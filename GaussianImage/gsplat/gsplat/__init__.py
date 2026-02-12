@@ -1,10 +1,10 @@
 from typing import Any
 import torch
-from .project_gaussians3d import project_gaussians
-from .rasterize3d import rasterize_gaussians
+from .project_gaussians import project_gaussians
+from .rasterize import rasterize_gaussians
 from .project_gaussians_2d import project_gaussians_2d
 from .project_gaussians_2d_scale_rot import project_gaussians_2d_scale_rot
-from .rasterize_sum import rasterize_gaussians_sum
+from .rasterize_sum import rasterize_gaussians_sum, rasterize_gabor_sum
 from .utils import (
     map_gaussian_to_intersects,
     bin_and_sort_gaussians,
@@ -12,7 +12,7 @@ from .utils import (
     compute_cov2d_bounds,
     get_tile_bin_edges,
 )
-from .sh3d import spherical_harmonics
+from .sh import spherical_harmonics
 from .version import __version__
 import warnings
 
@@ -126,7 +126,7 @@ class ProjectGaussians(torch.autograd.Function):
             "ProjectGaussians is deprecated, use project_gaussians instead",
             DeprecationWarning,
         )
-        return project_gaussians3d(*args, **kwargs)
+        return project_gaussians(*args, **kwargs)
 
     @staticmethod
     def backward(ctx: Any, *grad_outputs: Any) -> Any:
