@@ -138,10 +138,9 @@ std::tuple<
 );
 
 std::tuple<
-    torch::Tensor, // output color image (H, W, 3)
-    torch::Tensor, // output alpha channel (H, W)
-    torch::Tensor, // final_Ts (H*W)
-    torch::Tensor  // final_idx (H*W)
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor
 >
 rasterize_forward_sum_gabor_tensor(
     const std::tuple<int, int, int> tile_bounds,

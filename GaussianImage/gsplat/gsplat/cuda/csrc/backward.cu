@@ -530,7 +530,6 @@ __global__ void rasterize_backward_sum_gabor_kernel(
     const int* __restrict__ final_index,
     const float3* __restrict__ v_output,
     const float* __restrict__ v_output_alpha,
-    
     int num_freqs,
     // output 
     float2* __restrict__ v_xy,
@@ -597,8 +596,9 @@ __global__ void rasterize_backward_sum_gabor_kernel(
         const int batch_end = range.y - 1 - BLOCK_SIZE * b;
         int batch_size = min(BLOCK_SIZE, batch_end + 1 - range.x);
         const int idx = batch_end - tr;
+        int32_t g_id;
         if (idx >= range.x) {
-            int32_t g_id = gaussian_ids_sorted[idx];
+            g_id = gaussian_ids_sorted[idx];
             id_batch[tr] = g_id;
             const float2 xy = xys[g_id];
             const float opac = opacities[g_id];
@@ -606,7 +606,7 @@ __global__ void rasterize_backward_sum_gabor_kernel(
             conic_batch[tr] = conics[g_id];
             rgbs_batch[tr] = rgbs[g_id];
             }
-        }
+
         // wait for other threads to collect the gaussians in batch
         block.sync();
         // process gaussians in the current batch for this pixel
@@ -620,7 +620,6 @@ __global__ void rasterize_backward_sum_gabor_kernel(
             float opac;
             float2 delta;
             float3 conic;
-            float vis;
             float gs_value;
             // 计算 Gabor 调制部分
             float weights_sum = 0.f;
@@ -628,10 +627,11 @@ __global__ void rasterize_backward_sum_gabor_kernel(
             float sin_sum_x = 0.f;
             float sin_sum_y = 0.f;
             float H;
+            float3 xy_opac;
 
             if(valid){
                 conic = conic_batch[t];
-                float3 xy_opac = xy_opacity_batch[t];
+                xy_opac = xy_opacity_batch[t];
                 opac = xy_opac.z;
                 delta = {xy_opac.x - px, xy_opac.y - py};
                 float sigma = 0.5f * (conic.x * delta.x * delta.x +
@@ -642,20 +642,21 @@ __global__ void rasterize_backward_sum_gabor_kernel(
                 // 读取 Gabor 参数
                 for (int f = 0; f < num_freqs; ++f) {
                     
-                    int g_idx = g_id * num_freqs + f; 
+                    //int g_idx = g_id * num_freqs + f; 
+                    int32_t g = id_batch[t];
+                    int g_idx = g * num_freqs + f;
+
                     float fx = gabor_freqs_x[g_idx];
                     float fy = gabor_freqs_y[g_idx];
-                    //归一化
-                    float fx_uni = fx / (fx * fx + fy * fy + 1e-6f); 
-                    float fy_uni = fy / (fx * fx + fy * fy + 1e-6f);
+                
                     float w = gabor_weights[g_idx];
 
                     weights_sum += w;
                     // theta = 2 * pi * (f^T * x)
-                    float theta = 2.0f * M_PI * (delta.x * fx_uni + delta.y * fy_uni);
+                    float theta = 2.0f * M_PI * (delta.x * fx + delta.y * fy);
                     cos_sum += w * __cosf(theta);
-                    sin_sum_x -= 2.0f * M_PI * w * fx_uni * __sinf(theta);
-                    sin_sum_y -= 2.0f * M_PI * w * fy_uni * __sinf(theta);
+                    sin_sum_x -= 2.0f * M_PI * w * fx * __sinf(theta);
+                    sin_sum_y -= 2.0f * M_PI * w * fy * __sinf(theta);
                 }
 
                     // Gabor Modulation H
@@ -673,7 +674,9 @@ __global__ void rasterize_backward_sum_gabor_kernel(
             float3 v_conic_local = {0.f, 0.f, 0.f};
             float2 v_xy_local = {0.f, 0.f};
             float v_opacity_local = 0.f;
+            float v_alpha = 0.f;
 
+                        
             //initialize everything to 0, only set if the lane is valid
             if(valid){
                 // compute the current T for this gaussian
@@ -681,7 +684,6 @@ __global__ void rasterize_backward_sum_gabor_kernel(
                 // T *= ra;
                 // update v_rgb for this gaussian
                 const float fac = alpha;
-                float v_alpha = 0.f;
                 v_rgb_local = {fac * v_out.x, fac * v_out.y, fac * v_out.z};
 
                 const float3 rgb = rgbs_batch[t];
@@ -699,36 +701,38 @@ __global__ void rasterize_backward_sum_gabor_kernel(
                 v_xy_local = {v_sigma * (conic.x * xy_opac.x + conic.y * xy_opac.y) + v_alpha * opac * gs_value * sin_sum_x, 
                                     v_sigma * (conic.y * xy_opac.x + conic.z * xy_opac.y) + v_alpha * opac * gs_value * sin_sum_y};
                 v_opacity_local = v_alpha * gs_value * H;
+            }
 
-                for(int f = 0; f < F; ++f){
-                    float v_weight_local = 0.f;
-                    float v_freq_x_local = 0.f;
-                    float v_freq_y_local = 0.f;
+            for(int f = 0; f < num_freqs; ++f){
+                float v_weight_local = 0.f;
+                float v_freq_x_local = 0.f;
+                float v_freq_y_local = 0.f;
 
-                    int g_idx =g_id g * num_freqs + f; 
+                int32_t g = id_batch[t];
+                
+                if (valid) {
+                    int g_idx = g * num_freqs + f;
+
                     float fx = gabor_freqs_x[g_idx];
-                    float fy = gabor_freqs_y[g_idx];
-                    //归一化
-                    float fx_uni = fx / (fx * fx + fy * fy + 1e-6f); 
-                    float fy_uni = fy / (fx * fx + fy * fy + 1e-6f);
+                    float fy = gabor_freqs_y[g_idx]; 
                     float w = gabor_weights[g_idx]; 
 
-                    v_weight_local = v_alpha * opac * gs_value * (-1.0f + __cosf(2.0f * M_PI * (delta.x * fx_uni + delta.y * fy_uni)));
-                    v_freq_x_local = - v_alpha * opac * gs_value * 2.0f * M_PI * w * delta.x * __sinf(2.0f * M_PI * (delta.x * fx_uni + delta.y * fy_uni));
-                    v_freq_y_local = - v_alpha * opac * gs_value * 2.0f * M_PI * w * delta.y * __sinf(2.0f * M_PI * (delta.x * fx_uni + delta.y * fy_uni));
-
-                    // ===== warp reduce =====
-                    v_weight_local = warpSum(v_weight_local, warp);
-                    v_freq_x_local = warpSum(v_freq_x_local, warp);
-                    v_freq_y_local = warpSum(v_freq_y_local, warp);
-
-                    if (warp.thread_rank() == 0) {
-                        int32_t g = id_batch[t];
-                        atomicAdd(v_weights + g*F + f, v_weight_local);
-                        atomicAdd(v_freqs_x + g*F + f, v_freq_x_local);
-                        atomicAdd(v_freqs_y + g*F + f, v_freq_y_local);
-                    }
+                    v_weight_local = v_alpha * opac * gs_value * (-1.0f + __cosf(2.0f * M_PI * (delta.x * fx+ delta.y * fy)));
+                    v_freq_x_local = - v_alpha * opac * gs_value * 2.0f * M_PI * w * delta.x * __sinf(2.0f * M_PI * (delta.x * fx + delta.y * fy));
+                    v_freq_y_local = - v_alpha * opac * gs_value * 2.0f * M_PI * w * delta.y * __sinf(2.0f * M_PI * (delta.x * fx + delta.y * fy));
                 }
+
+                // ===== warp reduce =====
+                warpSum(v_weight_local, warp);
+                warpSum(v_freq_x_local, warp);
+                warpSum(v_freq_y_local, warp);
+
+                if (warp.thread_rank() == 0) {
+                    atomicAdd(v_weights + g * num_freqs + f, v_weight_local);
+                    atomicAdd(v_freqs_x + g * num_freqs + f, v_freq_x_local);
+                    atomicAdd(v_freqs_y + g * num_freqs + f, v_freq_y_local);
+                }
+            }
 
             warpSum3(v_rgb_local, warp);
             warpSum3(v_conic_local, warp);
@@ -934,6 +938,8 @@ __global__ void nd_rasterize_backward_sum_kernel(
     const float3* __restrict__ conics,
     const float* __restrict__ rgbs,
     const float* __restrict__ opacities,
+   
+
     const float* __restrict__ background,
     const float* __restrict__ final_Ts,
     const int* __restrict__ final_index,

@@ -22,6 +22,7 @@ class SimpleTrainer2d:
         num_points: int = 2000,
         model_name:str = "GaussianImage_Cholesky",
         iterations:int = 30000,
+        num_gabor: int = 2,
         model_path = None,
         args = None,
     ):
@@ -34,6 +35,7 @@ class SimpleTrainer2d:
         BLOCK_H, BLOCK_W = 16, 16
         self.H, self.W = self.gt_image.shape[2], self.gt_image.shape[3]
         self.iterations = iterations
+        self.num_gabor = num_gabor
         self.save_imgs = args.save_imgs
         self.log_dir = Path(f"./checkpoints/{args.data_name}/{model_name}_{args.iterations}_{num_points}/{self.image_name}")
         
@@ -41,7 +43,7 @@ class SimpleTrainer2d:
             ## gaussianimage_cholesky
             from gaussianimage_cholesky import GaussianImage_Cholesky
             self.gaussian_model = GaussianImage_Cholesky(loss_type="L2", opt_type="adan", num_points=self.num_points, H=self.H, W=self.W, BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W, 
-                device=self.device, lr=args.lr, quantize=False).to(self.device)
+                device=self.device, lr=args.lr, num_gabor=self.num_gabor, quantize=False).to(self.device)
 
         elif model_name == "GaussianImage_RS":
             from gaussianimage_rs import GaussianImage_RS
@@ -132,6 +134,9 @@ def parse_args(argv):
         "--sh_degree", type=int, default=3, help="SH degree (default: %(default)s)"
     )
     parser.add_argument(
+        "--num_gabor", type=int, default=2, help="The number of gabor frequency (default: %(default)s)"
+    )
+    parser.add_argument(
         "--num_points",
         type=int,
         default=50000,
@@ -139,7 +144,7 @@ def parse_args(argv):
     )
     parser.add_argument("--model_path", type=str, default=None, help="Path to a checkpoint")
     parser.add_argument("--seed", type=float, default=1, help="Set random seed for reproducibility")
-    parser.add_argument("--save_imgs", action="store_true", help="Save image")
+    parser.add_argument("--save_imgs", default = True, help="Save image")
     parser.add_argument(
         "--lr",
         type=float,
@@ -177,7 +182,7 @@ def main(argv):
             image_path = Path(args.dataset) /  f'{i+1:04}x2.png'
 
         trainer = SimpleTrainer2d(image_path=image_path, num_points=args.num_points, 
-            iterations=args.iterations, model_name=args.model_name, args=args, model_path=args.model_path)
+            iterations=args.iterations, model_name=args.model_name, num_gabor= args.num_gabor, args=args, model_path=args.model_path)
         psnr, ms_ssim, training_time, eval_time, eval_fps = trainer.train()
         psnrs.append(psnr)
         ms_ssims.append(ms_ssim)

@@ -142,14 +142,14 @@ __global__ void rasterize_forward_sum_gabor(
     const float3* __restrict__ conics,
     const float3* __restrict__ colors,
     const float* __restrict__ opacities,
-    float* __restrict__ final_Ts,
-    int* __restrict__ final_index,
-    float3* __restrict__ out_img,
-    const float3& __restrict__ background,
     const float* __restrict__ gabor_freqs_x,
     const float* __restrict__ gabor_freqs_y,    
     const float* __restrict__ gabor_weights,
-    const int num_freqs
+    const int num_freqs,
+    float* __restrict__ final_Ts,
+    int* __restrict__ final_index,
+    float3* __restrict__ out_img,
+    const float3& __restrict__ background
 );
 
 

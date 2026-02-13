@@ -7,7 +7,7 @@ device = torch.device("cuda:0")
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
 def test_project_gaussians_forward():
-    from gsplat import _torch_impl3d
+    from gsplat import _torch_impl
     import gsplat.cuda as _C
 
     torch.manual_seed(42)

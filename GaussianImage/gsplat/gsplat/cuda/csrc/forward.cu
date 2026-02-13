@@ -521,7 +521,6 @@ __global__ void rasterize_forward_sum_gabor(
     const float* __restrict__ gabor_freqs_y,
     const float* __restrict__ gabor_weights,
     const int num_freqs,
-
     // ouput
     float* __restrict__ final_Ts,
     int* __restrict__ final_index,
@@ -609,17 +608,19 @@ __global__ void rasterize_forward_sum_gabor(
 
             // 读取 Gabor 参数
             for (int f = 0; f < num_freqs; ++f) {
-                int g_idx = t * num_freqs + f; 
+
+                //int g_idx = t * num_freqs + f; 
+                int32_t g = id_batch[t];
+                int g_idx = g * num_freqs + f;
+
                 float fx = gabor_freqs_x[g_idx];
                 float fy = gabor_freqs_y[g_idx];
-                //归一化
-                float fx_uni = fx / (fx * fx + fy * fy + 1e-6f); 
-                float fy_uni = fy / (fx * fx + fy * fy + 1e-6f);
+                
                 float w = gabor_weights[g_idx];
 
                 weights_sum += w;
                 // theta = 2 * pi * (f^T * x)
-                float theta = 2.0f * M_PI * (delta.x * fx_uni + delta.y * fy_uni);
+                float theta = 2.0f * M_PI * (delta.x * fx + delta.y * fy);
                 cos_sum += w * __cosf(theta);
             }
 

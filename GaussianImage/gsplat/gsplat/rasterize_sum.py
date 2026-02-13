@@ -391,7 +391,7 @@ class RasterizeGaborSum(Function):
             
             # ===== 调用 Gabor 专用前向 kernel =====
             # 注意：C++ 函数名需与 bindings.cpp 中注册的名称一致
-            out_img, out_alpha, final_Ts, final_idx = _C.rasterize_forward_sum_gabor(
+            out_img, final_Ts, final_idx = _C.rasterize_gabor_forward(
                 tile_bounds,
                 block,
                 img_size,
@@ -407,7 +407,8 @@ class RasterizeGaborSum(Function):
                 gabor_freqs_y,
                 num_freqs,
             )
-            # out_img: (H, W, 3), out_alpha: (H, W), final_Ts/final_idx: (H*W,)
+            # out_img: (H, W, 3), final_Ts/final_idx: (H*W,)
+            #out_alpha = 1.0 - final_Ts
 
         # 保存反向传播所需的所有张量（包括 Gabor 参数）
         ctx.img_width = img_width
@@ -476,7 +477,7 @@ class RasterizeGaborSum(Function):
             v_freqs_y = torch.zeros_like(gabor_freqs_y)
         else:
             # ===== 调用 Gabor 专用反向 kernel =====
-            v_xy, v_conic, v_colors, v_opacity, v_weights, v_freqs_x, v_freqs_y = _C.rasterize_backward_sum_gabor(
+            v_xy, v_conic, v_colors, v_opacity, v_weights, v_freqs_x, v_freqs_y = _C.rasterize_gabor_backward(
                 img_height,
                 img_width,
                 BLOCK_H,
@@ -494,8 +495,8 @@ class RasterizeGaborSum(Function):
                 num_freqs,
                 final_Ts,
                 final_idx,
-                v_out_img,
-                v_out_alpha,
+                v_out_img.contiguous(),
+                v_out_alpha.contiguous(),
             )
 
         # 梯度返回顺序必须与 forward 输入参数严格对应

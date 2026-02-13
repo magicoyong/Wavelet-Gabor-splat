@@ -7,7 +7,7 @@ device = torch.device("cuda:0")
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
 def test_rasterize_empty_scene():
-    from gsplat import rasterize_gabor_sum
+    from gsplat.rasterize_sum import rasterize_gabor_sum
 
     # minimal empty scene: no intersects
     num_points = 4
@@ -49,7 +49,7 @@ def test_rasterize_empty_scene():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
 def test_rasterize_gabor_forward_backward():
-    from gsplat import rasterize_gabor_sum
+    from gsplat.rasterize_sum import rasterize_gabor_sum
     from gsplat.project_gaussians_2d import project_gaussians_2d
 
     torch.manual_seed(0)

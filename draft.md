@@ -4,7 +4,7 @@
 
 $$
 Gabor = exp(-\sigma)[(1 - \sum_{i=1}^F \omega_i) + \sum_i^{F}\omega_i cos(2\pi(\mathbf{f}_i^T\mathbf{d}))]\\
-=exp(-\sigma)(1 - \sum_{i=1}^F \omega_i) + \sum_i^{F}\omega_i  exp(-\sigma)cos(2\pi(\mathbf{f}_i^T\mathbf{d}))
+=exp(-\sigma)(1 - \sum_{i=1}^F \omega_i) + \sum_i^{F}\omega_i  exp(-\sigma)cos(2\pi(\mathbf{f}_i^T\mathbf{d}))
 $$
 
 
@@ -295,4 +295,21 @@ __global__ void project_gaussians_2d_forward_kernel(
 | `self.BLOCK_H`, `self.BLOCK_W` | int     | tile大小        |
 | `self.background`              | [3]     | 背景颜色        |
 | `return_alpha=False`           | boolean |                 |
+
+
+
+## Experiment
+
++ 需要查看训练结果
++ 检查代码
+  + 梯度计算
+  + 优化
+
++ DWT
+
+可以试一下用GaussianImage计算出图像（$\mu$，conic，color, opacity），然后加上频率再次优化
+
+对比下Gaussian和Gabor的位置什么的？
+
+
 
