@@ -1,0 +1,1 @@
+kodim01: 512x768, PSNR:21.9286, MS-SSIM:0.7271, bpp:0.4316, Eval:0.00054424s, FPS:1837.4150, position_bpp:0.2441, cholesky_bpp:0.1378, feature_dc_bpp:0.0497

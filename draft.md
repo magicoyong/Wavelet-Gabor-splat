@@ -313,3 +313,57 @@ __global__ void project_gaussians_2d_forward_kernel(
 
 
 
+## New idea
+
++ Gaussian找位置
+  + N个点
++ DWT区分高频，低频信号
+  + 高频，低频各一半，并不好。高频信号应该少，低频信号应该多
+  + $point = high\_freqs + low\_freqs$
+  + 用threshold来
++ 分别优化
+  + low——gaussian
+  + high——gabor
+  + 同时渲染表示，可以再放开一点threshold，加一个范数去约束高频gabor的频率
+
+
+
+```python
+def split_pointcloud_by_frequency(point_cloud, threshold = 2.5, wavelet='haar', level=1):
+    """
+    根据高频信息的显著程度，将原始点云划分为低频点集和高频点集。
+        
+    参数：
+     - point_cloud: numpy array, 原始点云 [N, 3]
+     - high_ratio: float, 高频点云占总点云的比例 (0.0 ~ 1.0)，例如 0.2 表示 20% 是高频点
+     - wavelet: str, 小波类型
+     - level: int, 分解层数
+        
+    返回：
+    - low_points: numpy array, 低频点云 [N * (1-high_ratio), 3]
+    - high_points: numpy array, 高频点云 [N * high_ratio, 3]
+    """
+    high_freq_signal = np.zeros_like(point_cloud)
+
+    # 1. 仅计算每个点的高频偏移信号
+    for i in range(2):
+        coeffs = pywt.wavedec(point_cloud[:, i], wavelet, level=level)
+        # 重构高频部分
+        high_freq_signal[:, i] = pywt.waverec([None] + coeffs[1:], wavelet)[:point_cloud.shape[0]]
+
+    # 2. 计算每个点的高频能量（向量的 L2 范数）
+    # 能量越大，说明该点的高频特征越显著（处于边缘或细节处）
+    hf_magnitude = np.linalg.norm(high_freq_signal, axis=1)
+
+    # 3. 根据阈值生成布尔掩码 (Mask)
+    # 能量大于阈值的点被划分为高频点，其余为低频点
+    high_mask = hf_magnitude > threshold
+    low_mask = ~high_mask  # 取反
+
+    # 4. 分离点云
+    high_points = point_cloud[high_mask]
+    low_points = point_cloud[low_mask]
+
+    return low_points, high_points
+```
+

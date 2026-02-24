@@ -1,2 +1,4 @@
 Test PSNR:13.1198, MS_SSIM:0.257094
 Training Complete in 179.2323s, Eval time:0.00053108s, FPS:1882.9479
+Test PSNR:13.7564, MS_SSIM:0.234861
+Training Complete in 233.9547s, Eval time:0.00082637s, FPS:1210.1072

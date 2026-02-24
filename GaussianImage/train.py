@@ -43,7 +43,7 @@ class SimpleTrainer2d:
             ## gaussianimage_cholesky
             from gaussianimage_cholesky import GaussianImage_Cholesky
             self.gaussian_model = GaussianImage_Cholesky(loss_type="L2", opt_type="adan", num_points=self.num_points, H=self.H, W=self.W, BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W, 
-                device=self.device, lr=args.lr, num_gabor=self.num_gabor, quantize=False).to(self.device)
+                device=self.device, lr=args.lr, num_gabor=self.num_gabor, threshold = args.threshold, level = args.level, wavelet = args.wavelet, quantize=False).to(self.device)
 
         elif model_name == "GaussianImage_RS":
             from gaussianimage_rs import GaussianImage_RS
@@ -141,6 +141,15 @@ def parse_args(argv):
         type=int,
         default=50000,
         help="2D GS points (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--threshold", type=float, default = 2.5, help="The threshold for splitting high freqs and low freqs"
+    )
+    parser.add_argument( 
+        "--level", type=int, default = 1, help="The level for dwt"
+    )
+    parser.add_argument(
+        "--wavetlet", type=str, default="haar", help="The wavelet for dwt"
     )
     parser.add_argument("--model_path", type=str, default=None, help="Path to a checkpoint")
     parser.add_argument("--seed", type=float, default=1, help="Set random seed for reproducibility")

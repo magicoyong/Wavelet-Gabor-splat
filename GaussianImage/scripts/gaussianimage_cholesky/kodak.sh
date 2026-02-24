@@ -8,11 +8,11 @@ if [ -z "$data_path" ]; then
     exit 1
 fi
 
-# for num_points in 800 1000 3000 5000 7000 9000
-# do
-# CUDA_VISIBLE_DEVICES=0 python train.py -d $data_path \
-# --data_name kodak --model_name GaussianImage_Cholesky --num_points $num_points --iterations 50000
-# done
-
+for num_points in 500 600 800 1000 1200 1500
+do
 CUDA_VISIBLE_DEVICES=0 python train.py -d $data_path \
---data_name kodak --model_name GaussianImage_Cholesky --num_points 4000 --iterations 1000000
+--data_name kodak --model_name GaussianImage_Cholesky --num_points $num_points --iterations 150000
+done
+
+# CUDA_VISIBLE_DEVICES=0 python train.py -d $data_path \
+# --data_name kodak --model_name GaussianImage_Cholesky --num_points 4000 --iterations 1000000

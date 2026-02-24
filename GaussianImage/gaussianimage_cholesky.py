@@ -1,5 +1,5 @@
 from gsplat.project_gaussians_2d import project_gaussians_2d
-from gsplat.rasterize_sum import rasterize_gaussians_sum, rasterize_gabor_sum
+from gsplat.rasterize_sum import rasterize_gaussians_sum
 from utils import *
 import torch
 import torch.nn as nn
@@ -15,28 +15,19 @@ class GaussianImage_Cholesky(nn.Module):
         self.init_num_points = kwargs["num_points"]
         self.H, self.W = kwargs["H"], kwargs["W"]
         self.BLOCK_W, self.BLOCK_H = kwargs["BLOCK_W"], kwargs["BLOCK_H"]
-        # CUDA accelerate
         self.tile_bounds = (
             (self.W + self.BLOCK_W - 1) // self.BLOCK_W,
             (self.H + self.BLOCK_H - 1) // self.BLOCK_H,
             1,
         ) # 
         self.device = kwargs["device"]
-        # xyz \in [-1, 1]
+
         self._xyz = nn.Parameter(torch.atanh(2 * (torch.rand(self.init_num_points, 2) - 0.5)))
         self._cholesky = nn.Parameter(torch.rand(self.init_num_points, 3))
         self.register_buffer('_opacity', torch.ones((self.init_num_points, 1)))
-        self._features_dc = nn.Parameter(torch.rand(self.init_num_points, 3)) # rgb
-
-        self.num_gabor = 4 ##kwargs["num_gabor"]
-        ## small weight
-        self.gabor_freqs = nn.Parameter(torch.ones(self.init_num_points * self.num_gabor, 2) * 0.1)
-        self.gabor_weights = nn.Parameter(torch.ones(self.init_num_points * self.num_gabor, 1) * 0.01)
-
+        self._features_dc = nn.Parameter(torch.rand(self.init_num_points, 3))
         self.last_size = (self.H, self.W)
-
-        self.quantize = kwargs["quantize"] # T or F
-
+        self.quantize = kwargs["quantize"]
         self.register_buffer('background', torch.ones(3))
         self.opacity_activation = torch.sigmoid
         self.rgb_activation = torch.sigmoid
@@ -72,34 +63,15 @@ class GaussianImage_Cholesky(nn.Module):
     @property
     def get_cholesky_elements(self):
         return self._cholesky+self.cholesky_bound
-    
-    @property
-    def get_gabor_freqs(self):
-        return self.gabor_freqs
-    
-    @property
-    def get_gabor_weights(self):
-        return self.gabor_weights
-    
-    @property
-    def get_num_gabor(self):
-        return self.num_gabor
 
-    def forward(self): 
-        ## TODO: add gabor
-        ## 这里的xyz（均值）是归一化坐标，似乎没必要
+    def forward(self):
         self.xys, depths, self.radii, conics, num_tiles_hit = project_gaussians_2d(self.get_xyz, self.get_cholesky_elements, self.H, self.W, self.tile_bounds)
-        # out_img = rasterize_gaussians_sum(self.xys, depths, self.radii, conics, num_tiles_hit,
-        #         self.get_features, self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
-        out_img = rasterize_gabor_sum(self.xys, depths, self.radii, conics, num_tiles_hit,
-                self.get_features, self._opacity, self.get_gabor_freqs[:, 0], self.get_gabor_freqs[:, 1], self.get_gabor_weights, self.get_num_gabor,
-                self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
-        
+        out_img = rasterize_gaussians_sum(self.xys, depths, self.radii, conics, num_tiles_hit,
+                self.get_features, self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
         out_img = torch.clamp(out_img, 0, 1) #[H, W, 3]
         out_img = out_img.view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
         return {"render": out_img}
-    
-## training
+
     def train_iter(self, gt_image):
         render_pkg = self.forward()
         image = render_pkg["render"]
