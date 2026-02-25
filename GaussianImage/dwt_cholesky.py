@@ -76,16 +76,17 @@ class Mix_Cholesky(nn.Module):
         - level: int, 分解层数
             
         返回：
-        - low_points: numpy array, 低频点云 [N * (1-high_ratio), 3]
-        - high_points: numpy array, 高频点云 [N * high_ratio, 3]
+        - high_mask: boolean tensor
+        - low_mask: boolean tensor
         """
-        high_freq_signal = np.zeros_like(mu)
+        mu_np = mu.detach().cpu().numpy()
+        high_freq_signal = np.zeros_like(mu_np)
 
         # 1. 仅计算每个点的高频偏移信号
         for i in range(2):
-            coeffs = pywt.wavedec(mu[:, i], wavelet, level=level)
+            coeffs = pywt.wavedec(mu_np[:, i], wavelet, level=level)
             # 重构高频部分
-            high_freq_signal[:, i] = pywt.waverec([None] + coeffs[1:], wavelet)[:mu.shape[0]]
+            high_freq_signal[:, i] = pywt.waverec([None] + coeffs[1:], wavelet)[:mu_np.shape[0]]
 
         # 2. 计算每个点的高频能量（向量的 L2 范数）
         # 能量越大，说明该点的高频特征越显著（处于边缘或细节处）
@@ -96,7 +97,7 @@ class Mix_Cholesky(nn.Module):
         high_mask = hf_magnitude > threshold
         low_mask = ~high_mask  # 取反
 
-        return low_mask, high_mask
+        return torch.from_numpy(high_mask).to(mu.device), torch.from_numpy(low_mask).to(mu.device)
 
     def _init_data(self):
         self.cholesky_quantizer._init_data(self._cholesky)
@@ -159,10 +160,10 @@ class Mix_Cholesky(nn.Module):
                 self.get_high_features, self.get_high_opacity, self.get_gabor_freqs[:, 0], self.get_gabor_freqs[:, 1], self.get_gabor_weights, self.get_num_gabor,
                 self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
         
-        out_low = rasterize_gaussians_sum(self.low_mu_proj, low_depths, self.radii, low_conics, low_num_tiles_hit,
+        out_low = rasterize_gaussians_sum(self.low_mu_proj, low_depths, self.low_radii, low_conics, low_num_tiles_hit,
                  self.get_low_features, self.get_low_opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
         
-        out_img = out_high + out_img
+        out_img = out_high + out_low
         out_img = torch.clamp(out_img, 0, 1) #[H, W, 3]
         out_img = out_img.view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
         return {"render": out_img}
