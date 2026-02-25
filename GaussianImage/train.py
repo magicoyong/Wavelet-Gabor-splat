@@ -34,13 +34,14 @@ class SimpleTrainer2d:
         self.image_name = image_path.stem
         BLOCK_H, BLOCK_W = 16, 16
         self.H, self.W = self.gt_image.shape[2], self.gt_image.shape[3]
-        self.iterations = iterations
+        self.init_iterations = iterations
+        self.mix_iterations = args.mix_iterations
         self.num_gabor = num_gabor
         self.threshold = args.threshold
         self.wavelet = args.wavelet
         self.level = args.level
         self.save_imgs = args.save_imgs
-        self.log_dir = Path(f"./checkpoints/{args.data_name}/{model_name}_{args.iterations}_{num_points}/{self.image_name}")
+        self.log_dir = Path(f"./dwt_checkpoints/{args.data_name}/{model_name}_{args.mix_iterations}_{num_points}/{self.image_name}")
         
         if model_name == "GaussianImage_Cholesky":
             ## gaussianimage_cholesky
@@ -70,11 +71,11 @@ class SimpleTrainer2d:
 
     def train(self):     
         psnr_list, iter_list = [], []
-        progress_bar = tqdm(range(1, self.iterations+1), desc="Training progress")
+        progress_bar = tqdm(range(1, self.init_iterations+1), desc="Training progress")
         best_psnr = 0
         self.gaussian_model.train()
         start_time = time.time()
-        for iter in range(1, self.iterations+1):
+        for iter in range(1, self.init_iterations+1):
             loss, psnr = self.gaussian_model.train_iter(self.gt_image)
             psnr_list.append(psnr)
             iter_list.append(iter)
@@ -100,11 +101,11 @@ class SimpleTrainer2d:
 
     def train_gaussian(self):
         psnr_list, iter_list = [], []
-        progress_bar = tqdm(range(1, self.iterations+1), desc="Training progress")
+        progress_bar = tqdm(range(1, self.init_iterations+1), desc="Training progress")
         best_psnr = 0
         self.gaussian_model.train()
         start_time = time.time()
-        for iter in range(1, self.iterations+1):
+        for iter in range(1, self.init_iterations+1):
             loss, psnr = self.gaussian_model.train_iter(self.gt_image)
             psnr_list.append(psnr)
             iter_list.append(iter)
@@ -132,7 +133,7 @@ class SimpleTrainer2d:
         from dwt_cholesky import Mix_Cholesky
         ## TODO: iteration
         psnr_list, iter_list = [], []
-        progress_bar = tqdm(range(1, self.iterations+1), desc="Training progress")
+        progress_bar = tqdm(range(1, self.mix_iterations+1), desc="Training progress")
         best_psnr = 0
         # self.gaussian_model = GaussianImage_Cholesky(loss_type="L2", opt_type="adan", num_points=self.num_points, H=self.H, W=self.W, BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W, 
         #         device=self.device, lr=args.lr, quantize=False).to(self.device)
@@ -141,7 +142,7 @@ class SimpleTrainer2d:
                                       conic = self.gaussian_model._cholesky, features = self.gaussian_model._features_dc, num_gabor = self.num_gabor, quantize=False).to(self.device)
         self.mix_model.train()
         start_time = time.time()
-        for iter in range(1, self.iterations+1):
+        for iter in range(1, self.mix_iterations+1):
             loss, psnr = self.mix_model.train_iter(self.gt_image)
             psnr_list.append(psnr)
             iter_list.append(iter)
@@ -220,7 +221,10 @@ def parse_args(argv):
         "--data_name", type=str, default='kodak', help="Training dataset"
     )
     parser.add_argument(
-        "--iterations", type=int, default=50000, help="number of training epochs (default: %(default)s)"
+        "--mix_iterations", type=int, default=50000, help="number of training epochs in mix model (default: %(default)s)"
+    )
+    parser.add_argument(
+        "--init_iterations", type=int, default=50000, help="number of training epochs in gaussian model(default: %(default)s)"
     )
     parser.add_argument(
         "--model_name", type=str, default="GaussianImage_Cholesky", help="model selection: GaussianImage_Cholesky, GaussianImage_RS, 3DGS"
@@ -271,7 +275,7 @@ def main(argv):
         torch.backends.cudnn.benchmark = False
         np.random.seed(args.seed)
 
-    logwriter = LogWriter(Path(f"./dwt_checkpoints/{args.data_name}/{args.model_name}_{args.iterations}_{args.num_points}"))
+    logwriter = LogWriter(Path(f"./dwt_checkpoints/{args.data_name}/{args.model_name}_{args.mix_iterations}_{args.num_points}"))
     gaussian_psnrs, gaussian_ms_ssims, gaussian_training_times, gaussian_eval_times, gaussian_eval_fpses = [], [], [], [], []
     mix_psnrs, mix_ms_ssims, mix_training_times, mix_eval_times, mix_eval_fpses = [], [], [], [], []
     image_h, image_w = 0, 0
@@ -287,7 +291,7 @@ def main(argv):
             image_path = Path(args.dataset) /  f'{i+1:04}x2.png'
 
         trainer = SimpleTrainer2d(image_path=image_path, num_points=args.num_points, 
-            iterations=args.iterations, model_name=args.model_name, num_gabor= args.num_gabor, args=args, model_path=args.model_path)
+            iterations=args.init_iterations, model_name=args.model_name, num_gabor= args.num_gabor, args=args, model_path=args.model_path)
         psnr, ms_ssim, training_time, eval_time, eval_fps = trainer.train_gaussian()
         gaussian_psnrs.append(psnr)
         gaussian_ms_ssims.append(ms_ssim)
