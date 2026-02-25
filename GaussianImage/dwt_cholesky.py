@@ -27,17 +27,24 @@ class Mix_Cholesky(nn.Module):
         self.level = kwargs["level"]
         self.wavelet = kwargs["wavelet"]
         # xyz \in [-1, 1]
-        self._xyz = kwargs["xyz"]
-        self.high_mask, self.low_mask = self.split_premitive_by_frequency(self._xyz, self.threshold, self.wavelet, self.level)
-        self.high_mu = self._xyz[self.high_mask]
-        self.low_mu = self._xyz[self.low_mask]
-        self._cholesky = kwargs["conic"]
-        self.low_cholesky = self._cholesky[self.low_mask]
-        self.high_cholesky = self._cholesky[self.high_mask]
-        self.low_features_dc, self.high_feature_dc = kwargs["features"][self.low_mask], kwargs["features"][self.high_mask]
+        xyz = kwargs["xyz"]
+        cholesky = kwargs["conic"]
+        features = kwargs["features"]
+        high_mask, low_mask = self.split_premitive_by_frequency(xyz, self.threshold, self.wavelet, self.level)
+        self.register_buffer('high_mask', high_mask)
+        self.register_buffer('low_mask', low_mask)
+        self.high_mu = nn.Parameter(xyz[self.high_mask].detach().clone())
+        self.low_mu = nn.Parameter(xyz[self.low_mask].detach().clone())
+        self.high_cholesky = nn.Parameter(cholesky[self.high_mask].detach().clone())
+        self.low_cholesky = nn.Parameter(cholesky[self.low_mask].detach().clone())
+        self.high_feature_dc = nn.Parameter(features[self.high_mask].detach().clone())
+        self.low_features_dc = nn.Parameter(features[self.low_mask].detach().clone())
 
         self.num_gabor = kwargs["num_gabor"]
-        self.register_buffer('_opacity', torch.ones((self.init_num_points, 1)))
+        n_low = self.low_mask.sum().item()
+        n_high = self.high_mask.sum().item()
+        self.register_buffer('low_opacity', torch.ones((n_low, 1)))
+        self.register_buffer('high_opacity', torch.ones((n_high, 1)))
         
         ## small weight
         self.gabor_freqs = nn.Parameter(torch.ones(len(self.high_mu) * self.num_gabor, 2) * 0.1)
@@ -120,19 +127,19 @@ class Mix_Cholesky(nn.Module):
     
     @property
     def get_low_opacity(self):
-        return self._opacity[self.low_mask]
+        return self.low_opacity
     
     @property
     def get_high_opacity(self):
-        return self._opacity[self.high_mask]
+        return self.high_opacity
 
     @property
     def get_low_cholesky_elements(self):
-        return self.low_cholesky + self.cholesky_bound[self.low_mask]
+        return self.low_cholesky + self.cholesky_bound
     
     @property
     def get_high_cholesky_elements(self):
-        return self.high_cholesky + self.cholesky_bound[self.high_mask]
+        return self.high_cholesky + self.cholesky_bound
     
     @property
     def get_gabor_freqs(self):
@@ -147,23 +154,40 @@ class Mix_Cholesky(nn.Module):
         return self.num_gabor
 
     def forward(self): 
-        ## 这里的xyz（均值）是归一化坐标，似乎没必要
-        ## low freqs
-        ## self.xys, depths, self.radii, conics, num_tiles_hit = project_gaussians_2d(self.get_xyz, self.get_cholesky_elements, self.H, self.W, self.tile_bounds)
-        self.low_mu_proj, low_depths, self.low_radii, low_conics, low_num_tiles_hit = project_gaussians_2d(self.get_low_mu, self.get_low_cholesky_elements, self.H, self.W, self.tile_bounds)
-        self.high_mu_proj, high_depths, self.high_radii, high_conic, high_num_tiles_hit = project_gaussians_2d(self.get_high_mu, self.get_high_cholesky_elements, self.H, self.W, self.tile_bounds)
-
-        # out_img = rasterize_gaussians_sum(self.xys, depths, self.radii, conics, num_tiles_hit,
-        #         self.get_features, self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
-
-        out_high = rasterize_gabor_sum(self.high_mu_proj, high_depths, self.high_radii, high_conic, high_num_tiles_hit,
-                self.get_high_features, self.get_high_opacity, self.get_gabor_freqs[:, 0], self.get_gabor_freqs[:, 1], self.get_gabor_weights, self.get_num_gabor,
-                self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
+        # 合并低频和高频点，使用单次 rasterize_gabor_sum 调用
+        # 低频点的 gabor 权重为 0，此时 H = 1.0，等价于普通高斯
+        # 这避免了子集点数过少导致 gsplat tile_bins 越界的 CUDA 错误
+        # 同时也避免了 background 被重复加两次的问题
         
-        out_low = rasterize_gaussians_sum(self.low_mu_proj, low_depths, self.low_radii, low_conics, low_num_tiles_hit,
-                 self.get_low_features, self.get_low_opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
+        n_low = self.low_mu.size(0)
+        n_high = self.high_mu.size(0)
         
-        out_img = out_high + out_low
+        # 拼接均值、协方差、颜色和不透明度（低频在前，高频在后）
+        all_mu = torch.cat([self.get_low_mu, self.get_high_mu], dim=0)
+        all_cholesky = torch.cat([self.get_low_cholesky_elements, self.get_high_cholesky_elements], dim=0)
+        all_features = torch.cat([self.get_low_features, self.get_high_features], dim=0)
+        all_opacity = torch.cat([self.low_opacity, self.high_opacity], dim=0)
+        
+        # 构造完整的 gabor 参数：低频点填零，高频点使用实际参数
+        # 内存布局: [point0_freq0, point0_freq1, ..., point1_freq0, ...]
+        low_gabor_freqs = torch.zeros(n_low * self.num_gabor, 2, device=all_mu.device)
+        low_gabor_weights = torch.zeros(n_low * self.num_gabor, 1, device=all_mu.device)
+        all_gabor_freqs = torch.cat([low_gabor_freqs, self.gabor_freqs], dim=0)
+        all_gabor_weights = torch.cat([low_gabor_weights, self.gabor_weights], dim=0)
+        
+        # 统一投影
+        self.xys, depths, self.radii, conics, num_tiles_hit = project_gaussians_2d(
+            all_mu, all_cholesky, self.H, self.W, self.tile_bounds)
+        
+        # 统一光栅化（gabor 权重为 0 的点等价于普通高斯）
+        out_img = rasterize_gabor_sum(
+            self.xys, depths, self.radii, conics, num_tiles_hit,
+            all_features, all_opacity,
+            all_gabor_freqs[:, 0], all_gabor_freqs[:, 1], all_gabor_weights.squeeze(-1),
+            self.num_gabor,
+            self.H, self.W, self.BLOCK_H, self.BLOCK_W,
+            background=self.background, return_alpha=False)
+        
         out_img = torch.clamp(out_img, 0, 1) #[H, W, 3]
         out_img = out_img.view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
         return {"render": out_img}

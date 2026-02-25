@@ -138,7 +138,7 @@ class SimpleTrainer2d:
         #         device=self.device, lr=args.lr, quantize=False).to(self.device)
         self.mix_model = Mix_Cholesky(loss_type="L2", opt_type="adan", H=self.H, W=self.W, BLOCK_H=self.gaussian_model.BLOCK_H, BLOCK_W=self.gaussian_model.BLOCK_W,
                                       device=self.device, lr=1e-3, threshold = self.threshold, wavelet = self.wavelet, level = self.level, xyz = self.gaussian_model._xyz, 
-                                      conic = self.gaussian_model._cholesky, features = self.gaussian_model._features_dc, num_gabor = self.num_gabor, quantize=False)
+                                      conic = self.gaussian_model._cholesky, features = self.gaussian_model._features_dc, num_gabor = self.num_gabor, quantize=False).to(self.device)
         self.mix_model.train()
         start_time = time.time()
         for iter in range(1, self.iterations+1):
@@ -271,7 +271,7 @@ def main(argv):
         torch.backends.cudnn.benchmark = False
         np.random.seed(args.seed)
 
-    logwriter = LogWriter(Path(f"./checkpoints/{args.data_name}/{args.model_name}_{args.iterations}_{args.num_points}"))
+    logwriter = LogWriter(Path(f"./dwt_checkpoints/{args.data_name}/{args.model_name}_{args.iterations}_{args.num_points}"))
     gaussian_psnrs, gaussian_ms_ssims, gaussian_training_times, gaussian_eval_times, gaussian_eval_fpses = [], [], [], [], []
     mix_psnrs, mix_ms_ssims, mix_training_times, mix_eval_times, mix_eval_fpses = [], [], [], [], []
     image_h, image_w = 0, 0
