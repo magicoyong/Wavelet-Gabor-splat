@@ -2,6 +2,7 @@
 
 ## primary
 
+GaussianImage并没有使用到`opacity`，也许可以考虑一下，新的$\alpha$ blending
 $$
 Gabor = exp(-\sigma)[(1 - \sum_{i=1}^F \omega_i) + \sum_i^{F}\omega_i cos(2\pi(\mathbf{f}_i^T\mathbf{d}))]\\
 =exp(-\sigma)(1 - \sum_{i=1}^F \omega_i) + \sum_i^{F}\omega_i  exp(-\sigma)cos(2\pi(\mathbf{f}_i^T\mathbf{d}))
@@ -315,6 +316,8 @@ __global__ void project_gaussians_2d_forward_kernel(
 
 ## New idea
 
+### 02.23
+
 + Gaussian找位置
   + N个点
 + DWT区分高频，低频信号
@@ -367,3 +370,17 @@ def split_pointcloud_by_frequency(point_cloud, threshold = 2.5, wavelet='haar', 
     return low_points, high_points
 ```
 
+### 02.25
+
++ 分解需要优化
++ 可以试一试冻结`low_freqs`的参数，只训练`high_freqs`
+  + 控制低频信号的表达能力
+
+
+
+### 02.27
+
+将简单的dwt加入训练后发现，gabor的表达能力似乎有所上升，但是效果仍然不满意
+
++ 更好的分解
++ 更好的loss设置，控制高频低频信号的比例

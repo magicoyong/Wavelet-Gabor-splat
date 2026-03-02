@@ -135,8 +135,6 @@ class SimpleTrainer2d:
         psnr_list, iter_list = [], []
         progress_bar = tqdm(range(1, self.mix_iterations+1), desc="Training progress")
         best_psnr = 0
-        # self.gaussian_model = GaussianImage_Cholesky(loss_type="L2", opt_type="adan", num_points=self.num_points, H=self.H, W=self.W, BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W, 
-        #         device=self.device, lr=args.lr, quantize=False).to(self.device)
         self.mix_model = Mix_Cholesky(loss_type="L2", opt_type="adan", H=self.H, W=self.W, BLOCK_H=self.gaussian_model.BLOCK_H, BLOCK_W=self.gaussian_model.BLOCK_W,
                                       device=self.device, lr=1e-3, threshold = self.threshold, wavelet = self.wavelet, level = self.level, xyz = self.gaussian_model._xyz, 
                                       conic = self.gaussian_model._cholesky, features = self.gaussian_model._features_dc, num_gabor = self.num_gabor, quantize=False).to(self.device)
@@ -224,7 +222,7 @@ class SimpleTrainer2d:
         if self.save_imgs:
             transform = transforms.ToPILImage()
             img = transform(out["render"].float().squeeze(0))
-            name = self.image_name + "_fitting.png" 
+            name = self.image_name + "_fitting_freezy.png" 
             img.save(str(self.log_dir / name))
         return psnr, ms_ssim_value
     
@@ -327,10 +325,9 @@ def main(argv):
         torch.backends.cudnn.benchmark = False
         np.random.seed(args.seed)
 
-    logwriter = LogWriter(Path(f"./dwt_checkpoints/{args.data_name}/{args.model_name}_{args.mix_iterations}_{args.num_points}"))
-    # gaussian_psnrs, gaussian_ms_ssims, gaussian_training_times, gaussian_eval_times, gaussian_eval_fpses = [], [], [], [], []
-    # mix_psnrs, mix_ms_ssims, mix_training_times, mix_eval_times, mix_eval_fpses = [], [], [], [], []
-    all_psnrs, all_ms_ssims, all_training_times, all_eval_times, all_eval_fpses = [], [], [], [], []
+    logwriter = LogWriter(Path(f"./freezy_checkpoints/{args.data_name}/{args.model_name}_{args.mix_iterations}_{args.num_points}"))
+    gaussian_psnrs, gaussian_ms_ssims, gaussian_training_times, gaussian_eval_times, gaussian_eval_fpses = [], [], [], [], []
+    mix_psnrs, mix_ms_ssims, mix_training_times, mix_eval_times, mix_eval_fpses = [], [], [], [], []
     image_h, image_w = 0, 0
     if args.data_name == "kodak":
         #image_length, start = 24, 0
@@ -343,70 +340,49 @@ def main(argv):
         elif args.data_name == "DIV2K_valid_LRX2":
             image_path = Path(args.dataset) /  f'{i+1:04}x2.png'
 
-    #     trainer = SimpleTrainer2d(image_path=image_path, num_points=args.num_points, 
-    #         iterations=args.init_iterations, model_name=args.model_name, num_gabor= args.num_gabor, args=args, model_path=args.model_path)
-    #     psnr, ms_ssim, training_time, eval_time, eval_fps = trainer.train_gaussian()
-    #     gaussian_psnrs.append(psnr)
-    #     gaussian_ms_ssims.append(ms_ssim)
-    #     gaussian_training_times.append(training_time) 
-    #     gaussian_eval_times.append(eval_time)
-    #     gaussian_eval_fpses.append(eval_fps)
-    #     image_h += trainer.H
-    #     image_w += trainer.W
-    #     image_name = image_path.stem
-    #     logwriter.write("{}: {}x{}, Gaussian PSNR:{:.4f}, Gaussian MS-SSIM:{:.4f}, Gaussian Training:{:.4f}s, Gaussian Eval:{:.8f}s, Gaussian FPS:{:.4f}".format(
-    #         image_name, trainer.H, trainer.W, psnr, ms_ssim, training_time, eval_time, eval_fps))
-        
-    #     psnr, ms_ssim, training_time, eval_time, eval_fps = trainer.train_mix()
-    #     mix_psnrs.append(psnr)
-    #     mix_ms_ssims.append(ms_ssim)
-    #     mix_training_times.append(training_time) 
-    #     mix_eval_times.append(eval_time)
-    #     mix_eval_fpses.append(eval_fps)
-    #     image_name = image_path.stem
-    #     logwriter.write("{}: {}x{}, Mix PSNR:{:.4f}, Mix MS-SSIM:{:.4f}, Mix Training:{:.4f}s, Mix Eval:{:.8f}s, Mix FPS:{:.4f}".format(
-    #         image_name, trainer.H, trainer.W, psnr, ms_ssim, training_time, eval_time, eval_fps))
-
-    # avg_gaussian_psnr = torch.tensor(gaussian_psnrs).mean().item()
-    # avg_gaussian_ms_ssim = torch.tensor(gaussian_ms_ssims).mean().item()
-    # avg_gaussian_training_time = torch.tensor(gaussian_training_times).mean().item()
-    # avg_gaussian_eval_time = torch.tensor(gaussian_eval_times).mean().item()
-    # avg_gaussian_eval_fps = torch.tensor(gaussian_eval_fpses).mean().item()
-
-    # avg_mix_psnr = torch.tensor(mix_psnrs).mean().item()
-    # avg_mix_ms_ssim = torch.tensor(mix_ms_ssims).mean().item()
-    # avg_mix_training_time = torch.tensor(mix_training_times).mean().item()
-    # avg_mix_eval_time = torch.tensor(mix_eval_times).mean().item()
-    # avg_mix_eval_fps = torch.tensor(mix_eval_fpses).mean().item()
-
-    trainer = SimpleTrainer2d(image_path=image_path, num_points=args.num_points, 
+        trainer = SimpleTrainer2d(image_path=image_path, num_points=args.num_points, 
             iterations=args.init_iterations, model_name=args.model_name, num_gabor= args.num_gabor, args=args, model_path=args.model_path)
-    psnr, ms_ssim, training_time, eval_time, eval_fps = trainer.train_all()
-    all_psnrs.append(psnr)
-    all_ms_ssims.append(ms_ssim)
-    all_training_times.append(training_time) 
-    all_eval_times.append(eval_time)
-    all_eval_fpses.append(eval_fps)
-    image_h += trainer.H
-    image_w += trainer.W
-    image_name = image_path.stem
-    logwriter.write("{}: {}x{}, All PSNR:{:.4f}, All MS-SSIM:{:.4f}, All Training:{:.4f}s, All Eval:{:.8f}s, All FPS:{:.4f}".format(
-            image_name, trainer.H, trainer.W, psnr, ms_ssim, training_time, eval_time, eval_fps))    
+        psnr, ms_ssim, training_time, eval_time, eval_fps = trainer.train_gaussian()
+        gaussian_psnrs.append(psnr)
+        gaussian_ms_ssims.append(ms_ssim)
+        gaussian_training_times.append(training_time) 
+        gaussian_eval_times.append(eval_time)
+        gaussian_eval_fpses.append(eval_fps)
+        image_h += trainer.H
+        image_w += trainer.W
+        image_name = image_path.stem
+        logwriter.write("{}: {}x{}, Gaussian PSNR:{:.4f}, Gaussian MS-SSIM:{:.4f}, Gaussian Training:{:.4f}s, Gaussian Eval:{:.8f}s, Gaussian FPS:{:.4f}".format(
+            image_name, trainer.H, trainer.W, psnr, ms_ssim, training_time, eval_time, eval_fps))
+        
+        psnr, ms_ssim, training_time, eval_time, eval_fps = trainer.train_mix()
+        mix_psnrs.append(psnr)
+        mix_ms_ssims.append(ms_ssim)
+        mix_training_times.append(training_time) 
+        mix_eval_times.append(eval_time)
+        mix_eval_fpses.append(eval_fps)
+        image_name = image_path.stem
+        logwriter.write("{}: {}x{}, Mix PSNR:{:.4f}, Mix MS-SSIM:{:.4f}, Mix Training:{:.4f}s, Mix Eval:{:.8f}s, Mix FPS:{:.4f}".format(
+            image_name, trainer.H, trainer.W, psnr, ms_ssim, training_time, eval_time, eval_fps))
 
-    avg_all_psnr = torch.tensor(all_psnrs).mean().item()
-    avg_all_ms_ssim = torch.tensor(all_ms_ssims).mean().item()
-    avg_all_training_time = torch.tensor(all_training_times).mean().item()
-    avg_all_eval_time = torch.tensor(all_eval_times).mean().item()
-    avg_all_eval_fps = torch.tensor(all_eval_fpses).mean().item()
+    avg_gaussian_psnr = torch.tensor(gaussian_psnrs).mean().item()
+    avg_gaussian_ms_ssim = torch.tensor(gaussian_ms_ssims).mean().item()
+    avg_gaussian_training_time = torch.tensor(gaussian_training_times).mean().item()
+    avg_gaussian_eval_time = torch.tensor(gaussian_eval_times).mean().item()
+    avg_gaussian_eval_fps = torch.tensor(gaussian_eval_fpses).mean().item()
+
+    avg_mix_psnr = torch.tensor(mix_psnrs).mean().item()
+    avg_mix_ms_ssim = torch.tensor(mix_ms_ssims).mean().item()
+    avg_mix_training_time = torch.tensor(mix_training_times).mean().item()
+    avg_mix_eval_time = torch.tensor(mix_eval_times).mean().item()
+    avg_mix_eval_fps = torch.tensor(mix_eval_fpses).mean().item()
+
     avg_h = image_h//image_length
     avg_w = image_w//image_length
 
     logwriter.write("Average Gaussian: {}x{}, PSNR:{:.4f}, MS-SSIM:{:.4f}, Training:{:.4f}s, Eval:{:.8f}s, FPS:{:.4f}".format(
-        avg_h, avg_w, avg_all_psnr, avg_all_ms_ssim, avg_all_training_time, avg_all_eval_time, avg_all_eval_fps))
-    # logwriter.write("Average Gaussian: {}x{}, PSNR:{:.4f}, MS-SSIM:{:.4f}, Training:{:.4f}s, Eval:{:.8f}s, FPS:{:.4f}".format(
-    #     avg_h, avg_w, avg_gaussian_psnr, avg_gaussian_ms_ssim, avg_gaussian_training_time, avg_gaussian_eval_time, avg_gaussian_eval_fps))
-    # logwriter.write("Average Mix: {}x{}, PSNR:{:.4f}, MS-SSIM:{:.4f}, Training:{:.4f}s, Eval:{:.8f}s, FPS:{:.4f}".format(
-    #     avg_h, avg_w, avg_mix_psnr, avg_mix_ms_ssim, avg_mix_training_time, avg_mix_eval_time, avg_mix_eval_fps))
+        avg_h, avg_w, avg_gaussian_psnr, avg_gaussian_ms_ssim, avg_gaussian_training_time, avg_gaussian_eval_time, avg_gaussian_eval_fps))
+    logwriter.write("Average Mix_freezy: {}x{}, PSNR:{:.4f}, MS-SSIM:{:.4f}, Training:{:.4f}s, Eval:{:.8f}s, FPS:{:.4f}".format(
+        avg_h, avg_w, avg_mix_psnr, avg_mix_ms_ssim, avg_mix_training_time, avg_mix_eval_time, avg_mix_eval_fps))
     
 if __name__ == "__main__":
     main(sys.argv[1:])
