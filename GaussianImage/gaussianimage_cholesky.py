@@ -43,6 +43,11 @@ class GaussianImage_Cholesky(nn.Module):
         self.register_buffer('bound', torch.tensor([0.5, 0.5]).view(1, 2))
         self.register_buffer('cholesky_bound', torch.tensor([0.5, 0, 0.5]).view(1, 3))
 
+         # DWT loss 权重
+        self.lambda_ll = kwargs.get("lambda_ll", 0.01)   # 低频 L1 权重
+        self.lambda_hf = kwargs.get("lambda_hf", 0.01)   # 高频 L1(detail, 0) 权重
+        self.level = kwargs.get("level", 2)
+
         if self.quantize:
             self.xyz_quantizer = FakeQuantizationHalf.apply 
             self.features_dc_quantizer = VectorQuantizer(codebook_dim=3, codebook_size=8, num_quantizers=2, vector_type="vector", kmeans_iters=5) 
@@ -53,6 +58,73 @@ class GaussianImage_Cholesky(nn.Module):
         else:
             self.optimizer = Adan(self.parameters(), lr=kwargs["lr"])
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=20000, gamma=0.5)
+
+        # ------------------------------------------------------------------ #
+    #  2D Haar DWT：对图像做多级小波分解，用于 DWT loss
+    # ------------------------------------------------------------------ #
+    def _haar_dwt2d_one_level(self, x):
+        """
+        单层 2D Haar 小波分解。
+        x: [B, C, H, W] -> LL, LH, HL, HH  各 [B, C, H//2, W//2]
+        """
+        # 行方向 (沿 H)
+        if x.shape[2] % 2 != 0:
+            x = F.pad(x, (0, 0, 0, 1), mode='replicate')
+        if x.shape[3] % 2 != 0:
+            x = F.pad(x, (0, 1, 0, 0), mode='replicate')
+        # 分离偶数行/奇数行
+        x_even = x[:, :, 0::2, :]   # [B, C, H/2, W]
+        x_odd  = x[:, :, 1::2, :]   # [B, C, H/2, W]
+        # 行方向低频/高频
+        L = (x_even + x_odd) / 2.0
+        H_row = (x_even - x_odd) / 2.0
+        # 列方向 (沿 W)
+        LL = (L[:, :, :, 0::2] + L[:, :, :, 1::2]) / 2.0
+        # LH = (L[:, :, :, 0::2] - L[:, :, :, 1::2]) / 2.0
+        # HL = (H_row[:, :, :, 0::2] + H_row[:, :, :, 1::2]) / 2.0
+        HH = (H_row[:, :, :, 0::2] - H_row[:, :, :, 1::2]) / 2.0
+        return LL, HH
+
+    def _haar_dwt2d_multilevel(self, x, level=None):
+        """
+        多级 2D Haar 分解。
+        x: [B, C, H, W]
+        返回:
+          ll_list: 每级的 LL 子带, ll_list[0] 为第 1 级, ll_list[-1] 为最粗级
+          details_list: 每级的 (LH, HL, HH)
+        """
+        if level is None:
+            level = self.level
+        ll_list = []
+        details_list = []
+        a = x
+        for _ in range(level):
+            LL, HH = self._haar_dwt2d_one_level(a)
+            ll_list.append(LL)
+            details_list.append(HH)
+            a = LL
+        return ll_list, details_list
+
+    def dwt_loss(self, pred, gt):
+        """
+        DWT 频域 loss:
+          L_LF = sum_n lambda_ll * L1(pred_LL^n, gt_LL^n)
+          L_HF = sum_n lambda_hf * (L1(pred_LH^n, 0) + L1(pred_HL^n, 0) + L1(pred_HH^n, 0))
+        pred, gt: [B, C, H, W]
+        """
+        pred_lls, pred_details = self._haar_dwt2d_multilevel(pred)
+        gt_lls, gt_hhs             = self._haar_dwt2d_multilevel(gt)
+
+        loss_lf = 0.0
+        loss_hf = 0.0
+        for n in range(self.level):
+            # 低频 L1
+            loss_lf += F.l1_loss(pred_lls[n], gt_lls[n])
+            # 高频分量与 0 的 L1 (即绝对值均值)
+            HH = pred_details[n]
+            loss_hf += HH.abs().mean()
+
+        return self.lambda_ll * loss_lf + self.lambda_hf * loss_hf
 
     def _init_data(self):
         self.cholesky_quantizer._init_data(self._cholesky)
@@ -103,7 +175,12 @@ class GaussianImage_Cholesky(nn.Module):
     def train_iter(self, gt_image):
         render_pkg = self.forward()
         image = render_pkg["render"]
-        loss = loss_fn(image, gt_image, self.loss_type, lambda_value=0.7)
+        # 原始像素 loss
+        pixel_loss = loss_fn(image, gt_image, self.loss_type, lambda_value=0.7)
+        # DWT 频域 loss
+        dwt_l = self.dwt_loss(image, gt_image)
+        loss = pixel_loss + dwt_l
+
         loss.backward()
         with torch.no_grad():
             mse_loss = F.mse_loss(image, gt_image)

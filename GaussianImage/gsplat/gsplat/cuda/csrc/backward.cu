@@ -698,8 +698,8 @@ __global__ void rasterize_backward_sum_gabor_kernel(
                                         0.5f * v_sigma * delta.y * delta.y};
                         
 
-                v_xy_local = {v_sigma * (conic.x * xy_opac.x + conic.y * xy_opac.y) + v_alpha * opac * gs_value * sin_sum_x, 
-                                    v_sigma * (conic.y * xy_opac.x + conic.z * xy_opac.y) + v_alpha * opac * gs_value * sin_sum_y};
+                v_xy_local = {v_sigma * (conic.x * delta.x + conic.y * delta.y) + v_alpha * opac * gs_value * sin_sum_x, 
+                                    v_sigma * (conic.y * delta.x + conic.z * delta.y) + v_alpha * opac * gs_value * sin_sum_y};
                 v_opacity_local = v_alpha * gs_value * H;
             }
 
