@@ -25,13 +25,14 @@ class All_Cholesky(nn.Module):
         )
         self.device = kwargs["device"]
 
-        # 可训练阈值：控制高低频划分边界
-        self.init_threshold = nn.Parameter(torch.tensor(float(kwargs.get("threshold", 2.5))))
-        self._threshold_raw = nn.Parameter(torch.tensor(math.log(math.exp(self.init_threshold) - 1.0)))
-        self.threshold = kwargs.get("threshold", 2.5)
+        # 可训练阈值：控制高低频划分边界 (init_threshold 不再是 Parameter)
+        init_val = float(kwargs.get("threshold", 2.5))
+        self.register_buffer('init_threshold', torch.tensor(init_val))
+        self._threshold_raw = nn.Parameter(torch.tensor(math.log(math.exp(init_val) - 1.0)))
+        self.threshold = init_val
 
         # sigmoid 锐度：越大越接近硬阈值，可在训练过程中退火
-        self.temperature = kwargs.get("temperature", 5.0)
+        self.temperature = kwargs.get("temperature", 2.0)
         self.level = kwargs["level"]
         # wavelet 类型（目前仅实现 Haar 的可微版本）
         self.wavelet = kwargs.get("wavelet", "haar")
@@ -66,11 +67,86 @@ class All_Cholesky(nn.Module):
             self.features_dc_quantizer = VectorQuantizer(codebook_dim=3, codebook_size=8, num_quantizers=2, vector_type="vector", kmeans_iters=5) 
             self.cholesky_quantizer = UniformQuantizer(signed=False, bits=6, learned=True, num_channels=3)
 
+        # DWT loss 权重
+        self.lambda_ll = kwargs.get("lambda_ll", 0.025)   # 低频 L1 权重
+        self.lambda_hf = kwargs.get("lambda_hf", 0.01)   # 高频 L1(detail, 0) 权重
+
         if kwargs["opt_type"] == "adam":
-            self.optimizer = torch.optim.Adam(self.parameters(), lr=kwargs["lr"])
+            # 对阈值使用极小的学习率，防止剧烈波动
+            self.optimizer = torch.optim.Adam([
+                {'params': [self._threshold_raw], 'lr': kwargs["lr"] * 0.01},
+                {'params': [p for n, p in self.named_parameters() if n != "_threshold_raw"], 'lr': kwargs["lr"]}
+            ])
         else:
             self.optimizer = Adan(self.parameters(), lr=kwargs["lr"])
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=20000, gamma=0.5)
+
+    # ------------------------------------------------------------------ #
+    #  2D Haar DWT：对图像做多级小波分解，用于 DWT loss
+    # ------------------------------------------------------------------ #
+    def _haar_dwt2d_one_level(self, x):
+        """
+        单层 2D Haar 小波分解。
+        x: [B, C, H, W] -> LL, LH, HL, HH  各 [B, C, H//2, W//2]
+        """
+        # 行方向 (沿 H)
+        if x.shape[2] % 2 != 0:
+            x = F.pad(x, (0, 0, 0, 1), mode='replicate')
+        if x.shape[3] % 2 != 0:
+            x = F.pad(x, (0, 1, 0, 0), mode='replicate')
+        # 分离偶数行/奇数行
+        x_even = x[:, :, 0::2, :]   # [B, C, H/2, W]
+        x_odd  = x[:, :, 1::2, :]   # [B, C, H/2, W]
+        # 行方向低频/高频
+        L = (x_even + x_odd) / 2.0
+        H_row = (x_even - x_odd) / 2.0
+        # 列方向 (沿 W)
+        LL = (L[:, :, :, 0::2] + L[:, :, :, 1::2]) / 2.0
+        LH = (L[:, :, :, 0::2] - L[:, :, :, 1::2]) / 2.0
+        HL = (H_row[:, :, :, 0::2] + H_row[:, :, :, 1::2]) / 2.0
+        HH = (H_row[:, :, :, 0::2] - H_row[:, :, :, 1::2]) / 2.0
+        return LL, LH, HL, HH
+
+    def _haar_dwt2d_multilevel(self, x, level=None):
+        """
+        多级 2D Haar 分解。
+        x: [B, C, H, W]
+        返回:
+          ll_list: 每级的 LL 子带, ll_list[0] 为第 1 级, ll_list[-1] 为最粗级
+          details_list: 每级的 (LH, HL, HH)
+        """
+        if level is None:
+            level = self.level
+        ll_list = []
+        details_list = []
+        a = x
+        for _ in range(level):
+            LL, LH, HL, HH = self._haar_dwt2d_one_level(a)
+            ll_list.append(LL)
+            details_list.append((LH, HL, HH))
+            a = LL
+        return ll_list, details_list
+
+    def dwt_loss(self, pred, gt):
+        """
+        DWT 频域 loss:
+          L_LF = sum_n lambda_ll * L1(pred_LL^n, gt_LL^n)
+          L_HF = sum_n lambda_hf * (L1(pred_LH^n, 0) + L1(pred_HL^n, 0) + L1(pred_HH^n, 0))
+        pred, gt: [B, C, H, W]
+        """
+        pred_lls, pred_details = self._haar_dwt2d_multilevel(pred)
+        gt_lls, _             = self._haar_dwt2d_multilevel(gt)
+
+        loss_lf = 0.0
+        loss_hf = 0.0
+        for n in range(self.level):
+            # 低频 L1
+            loss_lf += F.l1_loss(pred_lls[n], gt_lls[n])
+            # 高频分量与 0 的 L1 (即绝对值均值)
+            LH, HL, HH = pred_details[n]
+            loss_hf += (LH.abs().mean() + HL.abs().mean() + HH.abs().mean())
+
+        return self.lambda_ll * loss_lf + self.lambda_hf * loss_hf
 
     # ------------------------------------------------------------------ #
     #  可微分 Haar 小波：PyTorch 纯张量运算，支持对 mu 和 threshold 反传梯度
@@ -140,8 +216,8 @@ class All_Cholesky(nn.Module):
         """
         energy = self._compute_hf_energy(mu)
         
-        # softplus 保证 threshold > 0
-        threshold = F.softplus(self._threshold_raw)
+        # softplus 保证 threshold > 0 (加 epsilon 防止完全为 0)
+        threshold = F.softplus(self._threshold_raw) + 1e-3
         mask = torch.sigmoid((energy - threshold) * self.temperature)
         self.threshold = threshold
         return mask
@@ -206,21 +282,25 @@ class All_Cholesky(nn.Module):
         return {"render": out_img}
     
 ## training
-    def train_iter(self, gt_image):
+    def train_iter(self, gt_image, iter):
         render_pkg = self.forward()
         image = render_pkg["render"]
-        loss = loss_fn(image, gt_image, self.loss_type, lambda_value=0.7)
-        # 正则项1：鼓励 threshold 不要太小（保持在初始值附近）
+        # 原始像素 loss
+        pixel_loss = loss_fn(image, gt_image, self.loss_type, lambda_value=0.7)
+        # DWT 频域 loss
+        dwt_l = self.dwt_loss(image, gt_image)
         
-        reg_threshold = 0.05 * F.mse_loss(self.threshold, self.init_threshold.detach())
+        # --- 始终计算正则项，移除 if iter <= 15000 判断 ---
         
-        # 正则项2：鼓励 mask 的熵最大化（即高低频比例不要太极端）
-        soft_mask = self._compute_soft_mask(self.get_mu)
-        mean_mask = soft_mask.mean()
-        reg_entropy = -0.001 * (mean_mask * torch.log(mean_mask + 1e-8) 
-                                + (1 - mean_mask) * torch.log(1 - mean_mask + 1e-8))
-        total_loss = loss + reg_threshold + reg_entropy
-        total_loss.backward()
+        threshold = F.softplus(self._threshold_raw)
+        # 正则项1：约束阈值不偏离初始值
+        reg_threshold = 0.5 * F.mse_loss(threshold, self.init_threshold)
+
+        reg_weight = 1.0 if iter <= 15000 else 0.5
+        
+        loss = pixel_loss + dwt_l + reg_threshold * reg_weight
+        
+        loss.backward()
         # loss.backward()
         with torch.no_grad():
             mse_loss = F.mse_loss(image, gt_image)

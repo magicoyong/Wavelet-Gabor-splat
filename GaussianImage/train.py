@@ -180,7 +180,7 @@ class SimpleTrainer2d:
         self.all_model.train()
         start_time = time.time()
         for iter in range(1, self.mix_iterations+1):
-            loss, psnr = self.all_model.train_iter(self.gt_image)
+            loss, psnr = self.all_model.train_iter(self.gt_image, iter)
             psnr_list.append(psnr)
             iter_list.append(iter)
             with torch.no_grad():
