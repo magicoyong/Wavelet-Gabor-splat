@@ -37,13 +37,13 @@ class SimpleTrainer2d:
         self.iterations = iterations
         self.num_gabor = num_gabor
         self.save_imgs = args.save_imgs
-        self.log_dir = Path(f"./checkpoints/{args.data_name}/{model_name}_{args.iterations}_{num_points}/{self.image_name}")
+        self.log_dir = Path(f"./dwt_checkpoints/{args.data_name}/{model_name}_{args.iterations}_{num_points}_l2/{self.image_name}")
         
         if model_name == "GaussianImage_Cholesky":
             ## gaussianimage_cholesky
             from gaussianimage_cholesky import GaussianImage_Cholesky
             self.gaussian_model = GaussianImage_Cholesky(loss_type="L2", opt_type="adan", num_points=self.num_points, H=self.H, W=self.W, BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W, 
-                device=self.device, lr=args.lr, num_gabor=self.num_gabor, quantize=False).to(self.device)
+                device=self.device, lr=args.lr, num_gabor=self.num_gabor, reset_iter = args.reset_iter, quantize=False).to(self.device)
 
         elif model_name == "GaussianImage_RS":
             from gaussianimage_rs import GaussianImage_RS
@@ -66,15 +66,16 @@ class SimpleTrainer2d:
             self.gaussian_model.load_state_dict(model_dict)
 
     def train(self):     
-        psnr_list, iter_list = [], []
+        psnr_list, iter_list, loss_list = [], [], []
         progress_bar = tqdm(range(1, self.iterations+1), desc="Training progress")
         best_psnr = 0
         self.gaussian_model.train()
         start_time = time.time()
         for iter in range(1, self.iterations+1):
-            loss, psnr = self.gaussian_model.train_iter(self.gt_image)
+            loss, psnr = self.gaussian_model.train_iter(self.gt_image, iter)
             psnr_list.append(psnr)
             iter_list.append(iter)
+            loss_list.append(loss.item())
             with torch.no_grad():
                 if iter % 10 == 0:
                     progress_bar.set_postfix({f"Loss":f"{loss.item():.{7}f}", "PSNR":f"{psnr:.{4}f},"})
@@ -92,7 +93,7 @@ class SimpleTrainer2d:
         self.logwriter.write("Training Complete in {:.4f}s, Eval time:{:.8f}s, FPS:{:.4f}".format(end_time, test_end_time, 1/test_end_time))
         torch.save(self.gaussian_model.state_dict(), self.log_dir / "gaussian_model.pth.tar")
         np.save(self.log_dir / "training.npy", {"iterations": iter_list, "training_psnr": psnr_list, "training_time": end_time, 
-        "psnr": psnr_value, "ms-ssim": ms_ssim_value, "rendering_time": test_end_time, "rendering_fps": 1/test_end_time})
+        "psnr": psnr_value, "ms-ssim": ms_ssim_value, "rendering_time": test_end_time, "rendering_fps": 1/test_end_time, "loss": loss_list})
         return psnr_value, ms_ssim_value, end_time, test_end_time, 1/test_end_time
 
     def test(self):
@@ -135,6 +136,9 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--num_gabor", type=int, default=2, help="The number of gabor frequency (default: %(default)s)"
+    )
+    parser.add_argument(
+        "--reset_iter", type=int, default=3000, help="The epoch to reset gabor weights"
     )
     parser.add_argument(
         "--num_points",

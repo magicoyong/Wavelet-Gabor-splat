@@ -640,7 +640,7 @@ __global__ void rasterize_forward_sum_gabor(
             // T = next_T;
             cur_idx = batch_start + t;
         }
-        done = true;
+        // done = true;
     }
 
     if (inside) {
@@ -758,7 +758,7 @@ __global__ void rasterize_forward_sum(
             // T = next_T;
             cur_idx = batch_start + t;
         }
-        done = true;
+        //done = true;
     }
 
     if (inside) {
@@ -960,7 +960,6 @@ __global__ void rasterize_forward_sum_general(
             // T = next_T;
             cur_idx = batch_start + t;
         }
-        done = true;
     }
 
     if (inside) {
