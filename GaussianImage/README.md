@@ -58,6 +58,7 @@ After cloning the repository, you can follow these steps to train GaussianImage 
 ```bash
 cd gsplat
 pip install .[dev]
+BUILD_NO_CUDA=1 pip install -e .[dev]
 cd ../
 pip install -r requirements.txt
 ```

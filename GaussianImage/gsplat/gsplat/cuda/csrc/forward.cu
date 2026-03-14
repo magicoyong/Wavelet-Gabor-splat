@@ -617,17 +617,19 @@ __global__ void rasterize_forward_sum_gabor(
                 float fy = gabor_freqs_y[g_idx];
                 
                 float w = gabor_weights[g_idx];
-
+                
+                
                 weights_sum += w;
                 // theta = 2 * pi * (f^T * x)
-                float theta = 2.0f * M_PI * (delta.x * fx + delta.y * fy);
+                // float theta = 2.0f * M_PI * (delta.x * fx + delta.y * fy);
+                float theta = delta.x * fx + delta.y * fy;
                 cos_sum += w * __cosf(theta);
             }
 
             // Gabor Modulation H
             float H = (1.0f - weights_sum) + cos_sum;
             const float alpha = min(1.f, opac * gs_value * H);
-            if (sigma < 0.f || alpha < 1.f / 255.f) {
+            if (sigma < 0.f || alpha < H / 255.f) {
                 continue;
             }
 
@@ -640,7 +642,7 @@ __global__ void rasterize_forward_sum_gabor(
             // T = next_T;
             cur_idx = batch_start + t;
         }
-        // done = true;
+    //done = true;
     }
 
     if (inside) {

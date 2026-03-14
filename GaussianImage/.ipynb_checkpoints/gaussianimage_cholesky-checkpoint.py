@@ -28,10 +28,12 @@ class GaussianImage_Cholesky(nn.Module):
         self.register_buffer('_opacity', torch.ones((self.init_num_points, 1)))
         self._features_dc = nn.Parameter(torch.rand(self.init_num_points, 3)) # rgb
 
-        self.num_gabor = 8 ##kwargs["num_gabor"]
+        self.num_gabor = kwargs.get("num_gabor", 2)
+        self.reset_iter = kwargs.get("reset_iter", 3000)
         ## small weight
-        self.gabor_freqs = nn.Parameter(torch.ones(self.init_num_points * self.num_gabor, 2) * 0.1)
-        self.gabor_weights = nn.Parameter(torch.ones(self.init_num_points * self.num_gabor, 1) * 0.01)
+        # self.gabor_freqs = nn.Parameter(torch.rand(self.init_num_points * self.num_gabor, 2) * 1e-3)
+        self.gabor_freqs = nn.Parameter(torch.ones(self.init_num_points , 2) * 0.001)
+        self.gabor_weights = nn.Parameter(torch.ones(self.init_num_points * self.num_gabor, 1) * 0.5, requires_grad= False)
 
         self.last_size = (self.H, self.W)
 
@@ -43,10 +45,17 @@ class GaussianImage_Cholesky(nn.Module):
         self.register_buffer('bound', torch.tensor([0.5, 0.5]).view(1, 2))
         self.register_buffer('cholesky_bound', torch.tensor([0.5, 0, 0.5]).view(1, 3))
 
-         # DWT loss 权重
-        self.lambda_ll = kwargs.get("lambda_ll", 0.01)   # 低频 L1 权重
-        self.lambda_hf = kwargs.get("lambda_hf", 0.01)   # 高频 L1(detail, 0) 权重
-        self.level = kwargs.get("level", 2)
+        # Initialize gabor_freqs inversely proportional to Gaussian size (same as WIPES _normf)
+        # _L_size = torch.abs(self._cholesky.data + self.cholesky_bound).sum(dim=1, keepdim=True)  # [N, 1]
+        # _normf_init = 1e-3 / (_L_size + 1e-6)  # [N, 1]
+        # _normf_init = _normf_init.repeat(1, 2)  # [N, 2]
+        # _normf_init = _normf_init.unsqueeze(1).expand(-1, self.num_gabor, -1).reshape(-1, 2)  # [N*F, 2]
+        # self.gabor_freqs = nn.Parameter(_normf_init)
+        # self.gabor_weights = nn.Parameter(torch.ones(self.init_num_points * self.num_gabor, 1) * 0.5, requires_grad= False)
+        # # DWT loss 权重
+        # self.lambda_ll = kwargs.get("lambda_ll", 0.01)   # 低频 L1 权重
+        # self.lambda_hf = kwargs.get("lambda_hf", 0.01)   # 高频 L1(detail, 0) 权重
+        # self.level = kwargs.get("level", 2)
 
         if self.quantize:
             self.xyz_quantizer = FakeQuantizationHalf.apply 
@@ -158,11 +167,11 @@ class GaussianImage_Cholesky(nn.Module):
         return self.num_gabor
 
     def forward(self): 
-        ## TODO: add gabor
         ## 这里的xyz（均值）是归一化坐标，似乎没必要
         self.xys, depths, self.radii, conics, num_tiles_hit = project_gaussians_2d(self.get_xyz, self.get_cholesky_elements, self.H, self.W, self.tile_bounds)
         # out_img = rasterize_gaussians_sum(self.xys, depths, self.radii, conics, num_tiles_hit,
         #         self.get_features, self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
+        # self.gabor_weights.data.fill_(0.5)
         out_img = rasterize_gabor_sum(self.xys, depths, self.radii, conics, num_tiles_hit,
                 self.get_features, self._opacity, self.get_gabor_freqs[:, 0], self.get_gabor_freqs[:, 1], self.get_gabor_weights, self.get_num_gabor,
                 self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
@@ -172,16 +181,19 @@ class GaussianImage_Cholesky(nn.Module):
         return {"render": out_img}
     
 ## training
-    def train_iter(self, gt_image):
+    def train_iter(self, gt_image, iteration):
+        # if iteration % self.reset_iter == 0:
+        #     self.gabor_weights.data.fill_(0.001)
+        #     self.reset_iter+=100
         render_pkg = self.forward()
         image = render_pkg["render"]
         # 原始像素 loss
         pixel_loss = loss_fn(image, gt_image, self.loss_type, lambda_value=0.7)
-        # DWT 频域 loss
-        dwt_l = self.dwt_loss(image, gt_image)
-        #w_l = self.gabor_weights.square().mean() 
-        w_l = self.gabor_weights.abs().mean()
-        loss = pixel_loss  + 0.5 * dwt_l + 10 * w_l
+        # # DWT 频域 loss
+        # dwt_l = self.dwt_loss(image, gt_image)
+        # #w_l = self.gabor_weights.square().mean() 
+        # w_l = self.gabor_weights.abs().mean()
+        loss = pixel_loss  # + 0.5 * dwt_l + 10 * w_l
 
         loss.backward()
         with torch.no_grad():
