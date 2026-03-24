@@ -1,0 +1,18 @@
+#!/bin/bash
+
+data_path=$1
+
+if [ -z "$data_path" ]; then
+    echo "Error: No data_path provided."
+    echo "Usage: $0 <data_path>"
+    exit 1
+fi
+
+# for num_points in 2000 4000 6000 8000 10000 12000 14000
+# do
+# CUDA_VISIBLE_DEVICES=0 python train.py -d $data_path \
+# --data_name DIV2K_valid_LRX2 --model_name GaussianImage_Cholesky --num_points $num_points --iterations 50000
+# done
+
+CUDA_VISIBLE_DEVICES=0 python train.py -d $data_path \
+--data_name DIV2K_valid_LRX2 --model_name GaussianImage_Cholesky --num_points 70000 --iterations 75000 --lr 1e-2 --num_gabor 3
