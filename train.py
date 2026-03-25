@@ -39,7 +39,7 @@ class SimpleTrainer2d:
         self.save_imgs = args.save_imgs 
 
         #self.log_dir = Path(f"./checkpoints/{args.data_name}/{model_name}_{args.iterations}_{num_points}_{args.reset_iter}_{args.dwt_LF}_{args.dwt_HF}/{self.image_name}")
-        self.log_dir = Path(f"./checkpoints/{args.data_name}/{model_name}_{args.iterations}_{num_points}_{self.num_gabor}_noskip/{self.image_name}")
+        self.log_dir = Path(f"./checkpoints/{args.data_name}/{model_name}_{args.iterations}_{num_points}_{self.num_gabor}/{self.image_name}")
         
         if model_name == "GaussianImage_Cholesky":
             ## gaussianimage_cholesky
@@ -140,19 +140,6 @@ def parse_args(argv):
         "--num_gabor", type=int, default=2, help="The number of gabor frequency (default: %(default)s)"
     )
     parser.add_argument(
-        "--gabor_unfreeze_iter", type=int, default=12000,
-        help="Unfreeze gabor f/w after this iteration (default: %(default)s)"
-    )
-    parser.add_argument(
-        "--reset_iter", type=int, default=4000, help="The iterations of reseting"
-    )
-    parser.add_argument(
-        "--dwt_LF", type=int, default=0.1, help="The weight of punish LF"
-    )
-    parser.add_argument(
-        "--dwt_HF", type=int, default=0.1, help="The weight of punish HF"
-    )
-    parser.add_argument(
         "--num_points",
         type=int,
         default=50000,
@@ -184,7 +171,7 @@ def main(argv):
         np.random.seed(args.seed)
 
     # logwriter = LogWriter(Path(f"./checkpoints/{args.data_name}/{args.model_name}_{args.iterations}_{args.num_points}_{args.reset_iter}_{args.dwt_LF}_{args.dwt_HF}"))
-    logwriter = LogWriter(Path(f"./checkpoints/{args.data_name}/{args.model_name}_{args.iterations}_{args.num_points}_{args.num_gabor}_noskip"))
+    logwriter = LogWriter(Path(f"./checkpoints/{args.data_name}/{args.model_name}_{args.iterations}_{args.num_points}_{args.num_gabor}"))
     psnrs, ms_ssims, training_times, eval_times, eval_fpses = [], [], [], [], []
     image_h, image_w = 0, 0
     if args.data_name == "kodak":

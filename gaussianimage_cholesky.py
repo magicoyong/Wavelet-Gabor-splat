@@ -29,16 +29,9 @@ class GaussianImage_Cholesky(nn.Module):
         self._features_dc = nn.Parameter(torch.rand(self.init_num_points, 3)) # rgb
 
         self.num_gabor = kwargs.get("num_gabor", 2)
-        self.reset_iter = kwargs.get("reset_iter", 4000)
-        self.gabor_unfreeze_iter = kwargs.get("gabor_unfreeze_iter", 10000)
-        self._gabor_unfrozen = False
         ## small weight
-        
         self.gabor_freqs = nn.Parameter((torch.rand(self.init_num_points * self.num_gabor, 2) - 0.5) * 4)
-        #self.gabor_freqs = nn.Parameter(torch.rand(self.init_num_points * self.num_gabor, 2) * 1e-4, requires_grad=False)
         self.gabor_weights = nn.Parameter(torch.rand(self.init_num_points * self.num_gabor, 1) *(-5))
-        # self.gabor_freqs = nn.Parameter(torch.zeros(self.init_num_points * self.num_gabor, 2), requires_grad=False)
-        # self.gabor_weights = nn.Parameter(torch.ones(self.init_num_points * self.num_gabor, 1), requires_grad=False)
 
         self.last_size = (self.H, self.W)
 
@@ -56,8 +49,6 @@ class GaussianImage_Cholesky(nn.Module):
             self.cholesky_quantizer = UniformQuantizer(signed=False, bits=6, learned=True, num_channels=3)
 
         self.lr = kwargs["lr"]
-        # Only include base (non-frozen) params in the initial optimizer
-        # base_params = [self._xyz, self._cholesky, self._features_dc]
         if kwargs["opt_type"] == "adam":
             self.optimizer = torch.optim.Adam(self.parameters(), lr=kwargs["lr"])
         else:
@@ -97,37 +88,8 @@ class GaussianImage_Cholesky(nn.Module):
     def get_num_gabor(self):
         return self.num_gabor
 
-    # def _maybe_reinit_and_unfreeze_gabor(self, iteration):
-    #     if self._gabor_unfrozen:
-    #         return
-    #     if iteration >= self.gabor_unfreeze_iter:
-    #         with torch.no_grad():
-    #             self.gabor_freqs.copy_((torch.rand_like(self.gabor_freqs)- 0.5) * 2e-3)
-    #             self.gabor_weights.copy_(torch.rand_like(self.gabor_weights) * (-5))
-    #         self.gabor_freqs.requires_grad_(True)
-    #         self.gabor_weights.requires_grad_(True)
-    #         self._gabor_unfrozen = True
-    #         # Add Gabor params to existing optimizer, preserving momentum states of base params
-    #         self.optimizer.add_param_group({'params': [self.gabor_freqs],  'lr': self.lr * 0.1})
-    #         self.optimizer.add_param_group({'params': [self.gabor_weights], 'lr': self.lr * 0.5})
-
     def forward(self): 
         self.xys, depths, self.radii, conics, num_tiles_hit = project_gaussians_2d(self.get_xyz, self.get_cholesky_elements, self.H, self.W, self.tile_bounds)
-        
-#         if self._gabor_unfrozen:
-#             gabor_freqs_x = self.get_gabor_freqs[:, 0]
-#             gabor_freqs_y = self.get_gabor_freqs[:, 1]
-#             gabor_weights = self.get_gabor_weights
-#         else:
-#             num_gabor_points = self.init_num_points * self.num_gabor
-#             gabor_freqs_x = torch.zeros(num_gabor_points, device=self._xyz.device, dtype=self._xyz.dtype)
-#             gabor_freqs_y = torch.zeros(num_gabor_points, device=self._xyz.device, dtype=self._xyz.dtype)
-#             gabor_weights = torch.zeros(num_gabor_points, device=self._xyz.device, dtype=self._xyz.dtype)
-        
-#         out_img = rasterize_gabor_sum(self.xys, depths, self.radii, conics, num_tiles_hit,
-#                 self.get_features, self._opacity, gabor_freqs_x, gabor_freqs_y, gabor_weights, self.get_num_gabor,
-#                 self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
-        
         out_img = rasterize_gabor_sum(self.xys, depths, self.radii, conics, num_tiles_hit,
                 self.get_features, self._opacity, self.get_gabor_freqs[:,0], self.get_gabor_freqs[:,1], self.get_gabor_weights, self.get_num_gabor,
                 self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
@@ -138,16 +100,10 @@ class GaussianImage_Cholesky(nn.Module):
     
 ## training
     def train_iter(self, gt_image, iteration):
-        # if iteration % self.reset_iter == 0:
-        #     with torch.no_grad():
-        #         self.gabor_weights.uniform_(-5, 0)
-        #     self.reset_iter += 1000
-        #self._maybe_reinit_and_unfreeze_gabor(iteration)
         render_pkg = self.forward()
         image = render_pkg["render"]
         # 原始像素 loss
         pixel_loss = loss_fn(image, gt_image, self.loss_type, lambda_value=0.7) 
-        # dwt_l = 0.5 * dwt_loss(image, gt_image)
         #w_l = self.get_gabor_weights.abs().mean()
         loss = pixel_loss #+ 2 * w_l
         loss.backward()
