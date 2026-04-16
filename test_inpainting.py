@@ -15,12 +15,14 @@ from inpainting_utils import (
     generate_mask,
     generate_random_mask,
     generate_block_mask,
+    generate_elementwise_mask,
     masked_mse_loss,
     masked_l1_loss,
     masked_loss_fn,
     gabor_weights_l1_reg,
     position_l2_reg,
     cholesky_l2_reg,
+    tv_loss,
     compute_psnr,
     compute_error_map,
     mask_to_image_tensor,
@@ -120,10 +122,19 @@ class TestMaskGeneration:
         observed_ratio = mask.mean().item()
         assert abs(observed_ratio - 0.7) < 0.05  # within 5% tolerance
 
+    def test_elementwise_mask_shape_and_ratio(self):
+        torch.manual_seed(42)
+        mask = generate_elementwise_mask(64, 64, C=3, mask_ratio=0.8)
+        observed_ratio = mask.mean().item()
+        assert mask.shape == (1, 3, 64, 64)
+        assert abs(observed_ratio - 0.2) < 0.05
+
     def test_generate_mask_dispatch(self):
         mask_r = generate_mask(16, 16, mask_type="random")
+        mask_e = generate_mask(16, 16, mask_type="elementwise", C=3)
         mask_b = generate_mask(16, 16, mask_type="block", block_size=4, num_blocks=1)
         assert mask_r.shape == (1, 1, 16, 16)
+        assert mask_e.shape == (1, 3, 16, 16)
         assert mask_b.shape == (1, 1, 16, 16)
 
 
@@ -153,6 +164,22 @@ class TestUtils:
         mask = torch.ones(1, 1, 8, 8)
         img = mask_to_image_tensor(mask)
         assert img.shape == (1, 3, 8, 8)
+
+    def test_mask_to_image_tensor_elementwise(self):
+        mask = torch.ones(1, 3, 8, 8)
+        img = mask_to_image_tensor(mask)
+        assert img.shape == (1, 3, 8, 8)
+
+    def test_tv_loss_zero_on_constant_image(self):
+        image = torch.ones(1, 3, 8, 8)
+        loss = tv_loss(image)
+        assert loss.item() == pytest.approx(0.0, abs=1e-7)
+
+    def test_tv_loss_positive_on_gradient(self):
+        image = torch.zeros(1, 3, 8, 8)
+        image[:, :, :, 4:] = 1.0
+        loss = tv_loss(image)
+        assert loss.item() > 0
 
 
 # -----------------------------------------------------------------------
