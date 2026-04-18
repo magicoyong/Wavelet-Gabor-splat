@@ -292,6 +292,54 @@ def compute_ms_ssim(pred, target):
     return ms_ssim(pred.float(), target.float(), data_range=1, size_average=True).item()
 
 
+def compute_ssim_hsi(pred, target, window_size=11):
+    """Compute mean SSIM over all spectral bands for HSI data.
+
+    Args:
+        pred: (1, C, H, W) tensor
+        target: (1, C, H, W) tensor
+        window_size: Gaussian window size for SSIM
+
+    Returns:
+        float: mean SSIM across all C bands
+    """
+    C = pred.shape[1]
+    # Create 1D Gaussian kernel
+    sigma = 1.5
+    coords = torch.arange(window_size, dtype=torch.float32, device=pred.device) - window_size // 2
+    g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+    g = g / g.sum()
+    # 2D window
+    window = g.unsqueeze(1) * g.unsqueeze(0)  # (ws, ws)
+    window = window.unsqueeze(0).unsqueeze(0)  # (1, 1, ws, ws)
+
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+    pad = window_size // 2
+
+    ssim_bands = []
+    for c in range(C):
+        p = pred[:, c:c+1, :, :].float()  # (1, 1, H, W)
+        t = target[:, c:c+1, :, :].float()
+
+        mu_p = F.conv2d(p, window, padding=pad)
+        mu_t = F.conv2d(t, window, padding=pad)
+        mu_p_sq = mu_p ** 2
+        mu_t_sq = mu_t ** 2
+        mu_pt = mu_p * mu_t
+
+        sigma_p_sq = F.conv2d(p * p, window, padding=pad) - mu_p_sq
+        sigma_t_sq = F.conv2d(t * t, window, padding=pad) - mu_t_sq
+        sigma_pt = F.conv2d(p * t, window, padding=pad) - mu_pt
+
+        num = (2 * mu_pt + C1) * (2 * sigma_pt + C2)
+        den = (mu_p_sq + mu_t_sq + C1) * (sigma_p_sq + sigma_t_sq + C2)
+        ssim_map = num / den
+        ssim_bands.append(ssim_map.mean().item())
+
+    return np.mean(ssim_bands)
+
+
 # ---------------------------------------------------------------------------
 # Visualization / saving helpers
 # ---------------------------------------------------------------------------

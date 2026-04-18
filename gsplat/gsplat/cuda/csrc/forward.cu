@@ -763,6 +763,7 @@ __global__ void rasterize_forward_sum_gabor_4ch(
             pix_out.w = pix_out.w + c.w * vis;
             cur_idx = batch_start + t;
         }
+        // done = true;
     }
 
     if (inside) {
@@ -879,7 +880,7 @@ __global__ void rasterize_forward_sum(
             // T = next_T;
             cur_idx = batch_start + t;
         }
-        //done = true;
+        done = true;
     }
 
     if (inside) {

@@ -38,14 +38,22 @@ def load_dataset(name):
 
 def nmf_initialization(I, rank, dataset_name):
     """Perform NMF initialization."""
+    # Use canonical name for file naming consistency
+    _name_map = {
+        "urban": "Urban",
+        "salinas": "Salinas",
+        "jasperridge": "JR",
+        "paviau": "PaviaU",
+    }
+    canonical = _name_map.get(dataset_name.lower(), dataset_name)
     print(f"Running NMF initialization on {dataset_name} with rank={rank}")
     nmf = NMF(rank, init='random', random_state=42, max_iter=12000)
     endmember = nmf.fit_transform(I).T  # shape (rank, channels)
     abundance = nmf.components_.T       # shape (H*W, rank)
 
     os.makedirs("HSI/init", exist_ok=True)
-    np.save(f"HSI/init/{dataset_name}_endmember_rank_{rank}_NMF.npy", endmember)
-    np.save(f"HSI/init/{dataset_name}_abundance_rank_{rank}_NMF.npy", abundance)
+    np.save(f"HSI/init/{canonical}_endmember_rank_{rank}_NMF.npy", endmember)
+    np.save(f"HSI/init/{canonical}_abundance_rank_{rank}_NMF.npy", abundance)
     print(f"Saved NMF initialization results for {dataset_name}.")
 
 

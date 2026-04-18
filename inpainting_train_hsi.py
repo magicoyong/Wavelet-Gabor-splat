@@ -32,6 +32,7 @@ from inpainting_utils import (
     generate_mask,
     compute_inpainting_psnrs,
     get_missing_mask,
+    compute_ssim_hsi,
 )
 
 
@@ -218,7 +219,9 @@ class HSIInpaintingTrainer:
             pred_np = image.squeeze(0).permute(1, 2, 0).cpu().numpy()
             sam_value = compute_sam(gt_np, pred_np)
 
-        return psnr_metrics, sam_value, image, abundance
+            # SSIM (per-band mean)
+            ssim_value = compute_ssim_hsi(image, self.gt_image)
+        return psnr_metrics, sam_value, ssim_value, image, abundance
 
     def train(self):
         """Full HSI inpainting training loop."""
@@ -254,12 +257,12 @@ class HSIInpaintingTrainer:
         progress_bar.close()
 
         # Final evaluation (last model)
-        psnr_metrics, sam_value, reconstruction, abundance = self.evaluate()
+        psnr_metrics, sam_value, ssim_value, reconstruction, abundance = self.evaluate()
 
         # Also evaluate best model
         if best_model_dict is not None:
             self.model.load_state_dict(best_model_dict)
-        best_metrics, best_sam, best_recon, best_abundance = self.evaluate()
+        best_metrics, best_sam, best_ssim, best_recon, best_abundance = self.evaluate()
 
         self.logwriter.write(
             f"HSI Inpainting Complete in {end_time:.4f}s\n"
@@ -270,9 +273,11 @@ class HSIInpaintingTrainer:
             f"  PSNR(recon_obs):           {psnr_metrics['psnr_observed']:.4f}\n"
             f"  PSNR(recon_missing):       {psnr_metrics['psnr_missing']:.4f}\n"
             f"  SAM:                       {sam_value:.4f}\n"
+            f"  SSIM:                      {ssim_value:.4f}\n"
             f"  Best PSNR(recon vs gt):    {best_metrics['psnr_full']:.4f}\n"
             f"  Best PSNR(recon_missing):  {best_metrics['psnr_missing']:.4f}\n"
             f"  Best SAM:                  {best_sam:.4f}\n"
+            f"  Best SSIM:                 {best_ssim:.4f}\n"
         )
 
         # Save models
@@ -299,13 +304,15 @@ class HSIInpaintingTrainer:
             "best_psnr_full": best_metrics["psnr_full"],
             "best_psnr_missing": best_metrics["psnr_missing"],
             "best_sam": best_sam,
+            "ssim": ssim_value,
+            "best_ssim": best_ssim,
             "dataset": self.args.dataset,
             "rank": self.rank,
             "mask_type": self.args.mask_type,
             "mask_ratio": self.args.mask_ratio,
         })
 
-        return best_metrics["psnr_full"], best_sam, end_time
+        return best_metrics["psnr_full"], best_sam, best_ssim, end_time
 
 
 def parse_args(argv=None):
@@ -382,7 +389,7 @@ def main(argv=None):
     with open(config_path, "w") as f:
         f.write(args_text)
 
-    psnr, sam, training_time = trainer.train()
+    psnr, sam, ssim, training_time = trainer.train()
 
     print(f"\n=== HSI Inpainting Result ===")
     print(f"Dataset: {args.dataset}, Rank: {args.rank}")
@@ -390,6 +397,7 @@ def main(argv=None):
     print(f"PSNR(masked vs gt):    {trainer.psnr_masked:.4f}  (degradation baseline)")
     print(f"Best PSNR(recon vs gt): {psnr:.4f}")
     print(f"Best SAM:               {sam:.4f}")
+    print(f"Best SSIM:              {ssim:.4f}")
     print(f"Training Time:          {training_time:.2f}s")
 
 
