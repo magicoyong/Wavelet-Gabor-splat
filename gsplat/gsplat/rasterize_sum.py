@@ -390,8 +390,8 @@ class RasterizeGaborSum(Function):
             )
             
             # ===== 调用 Gabor 专用前向 kernel =====
-            # 注意：C++ 函数名需与 bindings.cpp 中注册的名称一致
-            out_img, final_Ts, final_idx = _C.rasterize_gabor_forward(
+            # 注意：C++ 函数名需与 ext.cpp 中注册的名称一致
+            out_img, final_Ts, final_idx = _C.rasterize_forward_sum_gabor(
                 tile_bounds,
                 block,
                 img_size,
@@ -477,7 +477,7 @@ class RasterizeGaborSum(Function):
             v_freqs_y = torch.zeros_like(gabor_freqs_y)
         else:
             # ===== 调用 Gabor 专用反向 kernel =====
-            v_xy, v_conic, v_colors, v_opacity, v_weights, v_freqs_x, v_freqs_y = _C.rasterize_gabor_backward(
+            v_xy, v_conic, v_colors, v_opacity, v_weights, v_freqs_x, v_freqs_y = _C.rasterize_backward_sum_gabor(
                 img_height,
                 img_width,
                 BLOCK_H,
@@ -520,3 +520,293 @@ class RasterizeGaborSum(Function):
             None,          # background
             None,          # return_alpha
         )
+
+
+def rasterize_gabor_sum_4ch(
+    xys: Float[Tensor, "*batch 2"],
+    depths: Float[Tensor, "*batch 1"],
+    radii: Float[Tensor, "*batch 1"],
+    conics: Float[Tensor, "*batch 3"],
+    num_tiles_hit: Int[Tensor, "*batch 1"],
+    colors: Float[Tensor, "*batch 4"],
+    opacity: Float[Tensor, "*batch 1"],
+    gabor_freqs_x: Float[Tensor, "*batch num_freqs"],
+    gabor_freqs_y: Float[Tensor, "*batch num_freqs"],
+    gabor_weights: Float[Tensor, "*batch num_freqs"],
+    num_freqs: int,
+    img_height: int,
+    img_width: int,
+    BLOCK_H: int = 16,
+    BLOCK_W: int = 16,
+    background: Optional[Float[Tensor, "4"]] = None,
+    return_alpha: Optional[bool] = False,
+) -> Tensor:
+    """4-channel Gabor sum-mode rasterization."""
+    if colors.dtype == torch.uint8:
+        colors = colors.float() / 255
+
+    if background is not None:
+        assert background.shape[0] == 4
+    else:
+        background = torch.ones(4, dtype=torch.float32, device=colors.device)
+
+    if xys.ndimension() != 2 or xys.size(1) != 2:
+        raise ValueError("xys must have dimensions (N, 2)")
+    if colors.ndimension() != 2 or colors.size(1) != 4:
+        raise ValueError("colors must have dimensions (N, 4)")
+
+    num_points = xys.size(0)
+    expected_size = num_points * num_freqs
+    gabor_freqs_x = gabor_freqs_x.contiguous().view(-1)
+    gabor_freqs_y = gabor_freqs_y.contiguous().view(-1)
+    gabor_weights = gabor_weights.contiguous().view(-1)
+
+    return RasterizeGaborSum4ch.apply(
+        xys.contiguous(),
+        depths.contiguous(),
+        radii.contiguous(),
+        conics.contiguous(),
+        num_tiles_hit.contiguous(),
+        colors.contiguous(),
+        opacity.contiguous(),
+        gabor_freqs_x,
+        gabor_freqs_y,
+        gabor_weights,
+        num_freqs,
+        img_height,
+        img_width,
+        BLOCK_H,
+        BLOCK_W,
+        background.contiguous(),
+        return_alpha,
+    )
+
+
+class RasterizeGaborSum4ch(Function):
+    """Rasterizes 2D gaussians with Gabor modulation — 4-channel variant."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        xys, depths, radii, conics, num_tiles_hit,
+        colors, opacity,
+        gabor_freqs_x, gabor_freqs_y, gabor_weights,
+        num_freqs, img_height, img_width,
+        BLOCK_H=16, BLOCK_W=16,
+        background=None, return_alpha=False,
+    ):
+        num_points = xys.size(0)
+        BLOCK_X, BLOCK_Y = BLOCK_W, BLOCK_H
+        tile_bounds = (
+            (img_width + BLOCK_X - 1) // BLOCK_X,
+            (img_height + BLOCK_Y - 1) // BLOCK_Y,
+            1,
+        )
+        block = (BLOCK_X, BLOCK_Y, 1)
+        img_size = (img_width, img_height, 1)
+
+        num_intersects, cum_tiles_hit = compute_cumulative_intersects(num_tiles_hit)
+
+        if num_intersects < 1:
+            out_img = (
+                torch.ones(img_height, img_width, 4, device=xys.device)
+                * background
+            )
+            gaussian_ids_sorted = torch.zeros(0, dtype=torch.int32, device=xys.device)
+            tile_bins = torch.zeros(0, 2, dtype=torch.int32, device=xys.device)
+            final_Ts = torch.zeros(img_height * img_width, device=xys.device)
+            final_idx = torch.zeros(
+                img_height * img_width, dtype=torch.int32, device=xys.device
+            )
+        else:
+            (_, _, _, gaussian_ids_sorted, tile_bins) = bin_and_sort_gaussians(
+                num_points, num_intersects,
+                xys, depths, radii, cum_tiles_hit, tile_bounds,
+            )
+            out_img, final_Ts, final_idx = _C.rasterize_forward_sum_gabor_4ch(
+                tile_bounds, block, img_size,
+                gaussian_ids_sorted, tile_bins,
+                xys, conics, colors, opacity, background,
+                gabor_weights, gabor_freqs_x, gabor_freqs_y, num_freqs,
+            )
+
+        ctx.img_width = img_width
+        ctx.img_height = img_height
+        ctx.BLOCK_H = BLOCK_H
+        ctx.BLOCK_W = BLOCK_W
+        ctx.num_intersects = num_intersects
+        ctx.num_freqs = num_freqs
+        ctx.save_for_backward(
+            gaussian_ids_sorted, tile_bins,
+            xys, conics, colors, opacity, background,
+            gabor_weights, gabor_freqs_x, gabor_freqs_y,
+            final_Ts, final_idx,
+        )
+        return out_img
+
+    @staticmethod
+    def backward(ctx, v_out_img):
+        img_height = ctx.img_height
+        img_width = ctx.img_width
+        num_freqs = ctx.num_freqs
+
+        v_out_alpha = torch.zeros(img_height, img_width, device=v_out_img.device)
+
+        (
+            gaussian_ids_sorted, tile_bins,
+            xys, conics, colors, opacity, background,
+            gabor_weights, gabor_freqs_x, gabor_freqs_y,
+            final_Ts, final_idx,
+        ) = ctx.saved_tensors
+
+        if ctx.num_intersects < 1:
+            v_xy = torch.zeros_like(xys)
+            v_conic = torch.zeros_like(conics)
+            v_colors = torch.zeros_like(colors)
+            v_opacity = torch.zeros_like(opacity)
+            v_weights = torch.zeros_like(gabor_weights)
+            v_freqs_x = torch.zeros_like(gabor_freqs_x)
+            v_freqs_y = torch.zeros_like(gabor_freqs_y)
+        else:
+            (
+                v_xy, v_conic, v_colors, v_opacity,
+                v_weights, v_freqs_x, v_freqs_y,
+            ) = _C.rasterize_backward_sum_gabor_4ch(
+                img_height, img_width,
+                ctx.BLOCK_H, ctx.BLOCK_W,
+                gaussian_ids_sorted, tile_bins,
+                xys, conics, colors, opacity, background,
+                gabor_weights, gabor_freqs_x, gabor_freqs_y, num_freqs,
+                final_Ts, final_idx,
+                v_out_img.contiguous(), v_out_alpha.contiguous(),
+            )
+
+        return (
+            v_xy, None, None, v_conic, None,
+            v_colors, v_opacity,
+            v_freqs_x, v_freqs_y, v_weights,
+            None, None, None, None, None, None, None,
+        )
+
+
+def rasterize_gabor_sum_nd(
+    xys: Float[Tensor, "*batch 2"],
+    depths: Float[Tensor, "*batch 1"],
+    radii: Float[Tensor, "*batch 1"],
+    conics: Float[Tensor, "*batch 3"],
+    num_tiles_hit: Int[Tensor, "*batch 1"],
+    colors: Float[Tensor, "*batch channels"],
+    opacity: Float[Tensor, "*batch 1"],
+    gabor_freqs_x: Float[Tensor, "*batch num_freqs"],
+    gabor_freqs_y: Float[Tensor, "*batch num_freqs"],
+    gabor_weights: Float[Tensor, "*batch num_freqs"],
+    num_freqs: int,
+    img_height: int,
+    img_width: int,
+    BLOCK_H: int = 16,
+    BLOCK_W: int = 16,
+    background: Optional[Float[Tensor, "channels"]] = None,
+    return_alpha: Optional[bool] = False,
+) -> Tensor:
+    """Multi-channel Gabor rasterization via 3-ch + 4-ch split rendering.
+
+    Decomposes ``colors`` (N, D) into groups of 3 and 4 channels, renders each
+    group through the corresponding Gabor CUDA kernel, and concatenates.
+    For any D >= 3, we can find non-negative integers (a, b) such that
+    3a + 4b = D (except D=1,2,5 which use padding).
+
+    When D <= 4, this falls through to the single-kernel path.
+    """
+    C = colors.shape[-1]
+
+    # Direct path for small channel counts
+    if C <= 3:
+        return rasterize_gabor_sum(
+            xys, depths, radii, conics, num_tiles_hit,
+            colors, opacity,
+            gabor_freqs_x, gabor_freqs_y, gabor_weights, num_freqs,
+            img_height, img_width, BLOCK_H, BLOCK_W,
+            background=background[:C] if background is not None else None,
+            return_alpha=return_alpha,
+        )
+    if C == 4:
+        return rasterize_gabor_sum_4ch(
+            xys, depths, radii, conics, num_tiles_hit,
+            colors, opacity,
+            gabor_freqs_x, gabor_freqs_y, gabor_weights, num_freqs,
+            img_height, img_width, BLOCK_H, BLOCK_W,
+            background=background[:4] if background is not None else None,
+            return_alpha=return_alpha,
+        )
+
+    # Decompose C into groups of 3 and 4: find (n3, n4) s.t. 3*n3 + 4*n4 = C
+    remainder = C % 3
+    if remainder == 0:
+        n4, n3 = 0, C // 3
+    elif remainder == 1 and C >= 4:
+        # e.g. C=7 -> 3+4, C=10 -> 3+3+4, C=13 -> 3+3+3+4
+        n4, n3 = 1, (C - 4) // 3
+    elif remainder == 2 and C >= 8:
+        # e.g. C=8 -> 4+4, C=11 -> 3+4+4, C=14 -> 3+3+4+4
+        n4, n3 = 2, (C - 8) // 3
+    else:
+        # C=1,2,5: pad to nearest feasible size
+        if C <= 3:
+            n4, n3 = 0, 1  # pad to 3
+        elif C == 5:
+            n4, n3 = 0, 2  # pad 5 -> 6 = 3+3
+        else:
+            n4, n3 = 0, (C + 2) // 3  # fallback: all 3-groups with padding
+
+    # Build split sizes list: 3s first, then 4s
+    split_sizes = [3] * n3 + [4] * n4
+    total = sum(split_sizes)
+
+    # Pad colors if decomposition overshoots (e.g. C=5 -> 6)
+    if total > C:
+        pad_n = total - C
+        colors = torch.cat([
+            colors,
+            torch.zeros(colors.shape[0], pad_n, device=colors.device, dtype=colors.dtype),
+        ], dim=1)
+        if background is not None:
+            background = torch.cat([
+                background,
+                torch.zeros(pad_n, device=background.device, dtype=background.dtype),
+            ], dim=0)
+
+    # Split and render each group
+    color_groups = torch.split(colors, split_sizes, dim=1)
+    if background is not None:
+        bg_groups = torch.split(background, split_sizes, dim=0)
+    else:
+        bg_groups = [None] * len(color_groups)
+
+    out_imgs = []
+    for cg_colors, cg_bg in zip(color_groups, bg_groups):
+        gc = cg_colors.shape[-1]
+        if gc == 3:
+            out = rasterize_gabor_sum(
+                xys, depths, radii, conics, num_tiles_hit,
+                cg_colors, opacity,
+                gabor_freqs_x, gabor_freqs_y, gabor_weights, num_freqs,
+                img_height, img_width, BLOCK_H, BLOCK_W,
+                background=cg_bg, return_alpha=False,
+            )
+        else:  # gc == 4
+            out = rasterize_gabor_sum_4ch(
+                xys, depths, radii, conics, num_tiles_hit,
+                cg_colors, opacity,
+                gabor_freqs_x, gabor_freqs_y, gabor_weights, num_freqs,
+                img_height, img_width, BLOCK_H, BLOCK_W,
+                background=cg_bg, return_alpha=False,
+            )
+        out_imgs.append(out)
+
+    result = torch.cat(out_imgs, dim=-1)  # (H, W, total)
+
+    # Trim padding channels if we padded
+    if total > C:
+        result = result[..., :C]
+
+    return result

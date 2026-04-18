@@ -77,7 +77,7 @@ def generate_elementwise_mask(H, W, C=3, mask_ratio=0.5, device="cpu"):
     return mask
 
 
-def generate_mask(H, W, mask_type="random", mask_ratio=0.5,
+def generate_mask(H, W, mask_type="elementwise", mask_ratio=0.5,
                   block_size=64, num_blocks=4, C=3, device="cpu"):
     """Unified mask generator.
 

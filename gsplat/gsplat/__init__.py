@@ -4,7 +4,7 @@ from .project_gaussians import project_gaussians
 from .rasterize import rasterize_gaussians
 from .project_gaussians_2d import project_gaussians_2d
 from .project_gaussians_2d_scale_rot import project_gaussians_2d_scale_rot
-from .rasterize_sum import rasterize_gaussians_sum, rasterize_gabor_sum
+from .rasterize_sum import rasterize_gaussians_sum, rasterize_gabor_sum, rasterize_gabor_sum_4ch, rasterize_gabor_sum_nd
 from .utils import (
     map_gaussian_to_intersects,
     bin_and_sort_gaussians,
