@@ -1,27 +1,18 @@
 """
-HSI Low-Rank Inpainting Training Entry Point.
-
-Supports two rendering back-ends selected via --method:
-  * gabor    – Gabor splatting  (GaussianImage_Cholesky_HSI)
-  * gaussian – Gaussian splatting (GaussianImage_Gaussian_HSI,
-               uses rasterize_gaussians_sum, arbitrary rank)
+HSI Low-Rank Gaussian Inpainting Training Entry Point.
 
 Pipeline:
-    1. Load HSI data and NMF endmember E / abundance A_init
+    1. Load HSI data and NMF endmember E
     2. Generate mask (random / elementwise / block)
-    3. Train model with masked observation-consistency loss in HSI space:
-       L = || mask * (A_hat @ E - Y) ||
-    4. Evaluate PSNR / SSIM / SAM on full / observed / missing regions
+    3. Render abundance maps with Gaussian splatting
+    4. Reconstruct HSI via A_hat @ E
+    5. Optimize masked observation-consistency loss in HSI space
+    6. Evaluate PSNR / SSIM / SAM on full / observed / missing regions
 
-Usage (Gaussian, default):
-    python inpainting_train_hsi.py --method gaussian --dataset JasperRidge \
-        --rank 10 --mask_type random --mask_ratio 0.5 --num_points 600 \
-        --iterations 8000
-
-Usage (Gabor, legacy):
-    python inpainting_train_hsi.py --method gabor --dataset JasperRidge \
-        --rank 10 --mask_type random --mask_ratio 0.5 --num_points 600 \
-        --num_gabor 2 --iterations 8000
+Usage:
+    python inpainting_train_hsi.py --dataset JasperRidge \
+        --rank 10 --mask_type random --mask_ratio 0.5 \
+        --num_points 600 --iterations 8000
 """
 
 import math
@@ -83,21 +74,26 @@ def load_endmember(dataset_name, rank):
         "jasperridge": "JR",
         "paviau": "PaviaU",
     }
-    prefix = name_map.get(dataset_name.lower(), dataset_name)
-    path = f"HSI/init/{prefix}_endmember_rank_{rank}_NMF.npy"
-    if not Path(path).exists():
-        # Try alternate naming
-        path = f"HSI/init/{prefix}_endmember_rank_{rank}.npy"
-    if not Path(path).exists():
-        raise FileNotFoundError(
-            f"Endmember file not found for dataset={dataset_name}, rank={rank}.\n"
-            f"  Tried: HSI/init/{prefix}_endmember_rank_{rank}_NMF.npy\n"
-            f"         HSI/init/{prefix}_endmember_rank_{rank}.npy\n"
-            f"  Please generate it first with:\n"
-            f"    python endmember.py --dataset {dataset_name} --rank {rank}"
-        )
-    E = np.load(path).astype(np.float32)
-    return E  # (rank, C)
+    canonical_prefix = name_map.get(dataset_name.lower(), dataset_name)
+    candidate_prefixes = []
+    for prefix in [canonical_prefix, dataset_name, dataset_name.lower()]:
+        if prefix not in candidate_prefixes:
+            candidate_prefixes.append(prefix)
+
+    tried_paths = []
+    for prefix in candidate_prefixes:
+        for suffix in ["_NMF.npy", ".npy"]:
+            path = Path(f"HSI/init/{prefix}_endmember_rank_{rank}{suffix}")
+            tried_paths.append(str(path))
+            if path.exists():
+                return np.load(path).astype(np.float32)
+
+    raise FileNotFoundError(
+        f"Endmember file not found for dataset={dataset_name}, rank={rank}.\n"
+        f"  Tried:\n    " + "\n    ".join(tried_paths) + "\n"
+        f"  Please generate it first with:\n"
+        f"    python endmember.py --dataset {dataset_name} --rank {rank}"
+    )
 
 
 def compute_sam(gt, pred):
@@ -113,7 +109,7 @@ def compute_sam(gt, pred):
 
 
 class HSIInpaintingTrainer:
-    """Trains Gabor or Gaussian splatting for HSI inpainting via low-rank decomposition."""
+    """Trains Gaussian splatting for HSI inpainting via low-rank decomposition."""
 
     def __init__(self, args):
         self.device = torch.device("cuda:0")
@@ -148,14 +144,8 @@ class HSIInpaintingTrainer:
         mse_masked = F.mse_loss(self.observed_image, self.gt_image)
         self.psnr_masked = 10 * math.log10(1.0 / mse_masked.item()) if mse_masked.item() > 0 else float('inf')
 
-        # Method: gabor or gaussian
-        self.method = getattr(args, 'method', 'gaussian')
-
         # Output directory
-        if self.method == 'gabor':
-            tag = f"GaborHSI_{args.iterations}_{args.num_points}_{args.num_gabor}_rank{args.rank}"
-        else:
-            tag = f"GaussianHSI_{args.iterations}_{args.num_points}_rank{args.rank}"
+        tag = f"GaussianHSI_{args.iterations}_{args.num_points}_rank{args.rank}"
         self.log_dir = Path(
             f"./checkpoints_inpainting_hsi/{args.dataset}/"
             f"{args.mask_type}_{args.mask_ratio}/{tag}"
@@ -165,33 +155,18 @@ class HSIInpaintingTrainer:
 
         # Build model
         BLOCK_H, BLOCK_W = 16, 16
-        if self.method == 'gabor':
-            from gaussianimage_cholesky_hsi import GaussianImage_Cholesky_HSI
-            self.model = GaussianImage_Cholesky_HSI(
-                loss_type=args.loss_type,
-                opt_type=getattr(args, 'opt_type', 'adan'),
-                num_points=args.num_points,
-                H=self.H, W=self.W,
-                rank=self.rank, C=self.C,
-                E=E,
-                BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
-                device=self.device,
-                lr=args.lr,
-                num_gabor=args.num_gabor,
-            ).to(self.device)
-        else:
-            from gaussianimage_gaussian_hsi import GaussianImage_Gaussian_HSI
-            self.model = GaussianImage_Gaussian_HSI(
-                loss_type=args.loss_type,
-                opt_type=getattr(args, 'opt_type', 'adan'),
-                num_points=args.num_points,
-                H=self.H, W=self.W,
-                rank=self.rank, C=self.C,
-                E=E,
-                BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
-                device=self.device,
-                lr=args.lr,
-            ).to(self.device)
+        from gaussianimage_cholesky_hsi import GaussianImage_Cholesky_HSI
+        self.model = GaussianImage_Cholesky_HSI(
+            loss_type=args.loss_type,
+            opt_type=getattr(args, 'opt_type', 'adan'),
+            num_points=args.num_points,
+            H=self.H, W=self.W,
+            rank=self.rank, C=self.C,
+            E=E,
+            BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
+            device=self.device,
+            lr=args.lr,
+        ).to(self.device)
 
         # Load pretrained model if provided
         if getattr(args, 'model_path', None) is not None:
@@ -354,12 +329,7 @@ class HSIInpaintingTrainer:
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="HSI Low-Rank Inpainting (Gabor / Gaussian)")
-
-    # Method
-    parser.add_argument("--method", type=str, default="gaussian",
-                        choices=["gabor", "gaussian"],
-                        help="Rendering back-end: gabor (legacy) or gaussian (default).")
+    parser = argparse.ArgumentParser(description="HSI Low-Rank Gaussian Inpainting")
 
     # Data
     parser.add_argument("--dataset", type=str, default="JasperRidge",
@@ -381,8 +351,6 @@ def parse_args(argv=None):
     # Model
     parser.add_argument("--num_points", type=int, default=600,
                         help="Number of 2D Gaussian points.")
-    parser.add_argument("--num_gabor", type=int, default=2,
-                        help="Number of Gabor frequencies per Gaussian (only for --method gabor).")
     parser.add_argument("--iterations", type=int, default=8000,
                         help="Number of training iterations.")
     parser.add_argument("--lr", type=float, default=5e-3,
@@ -422,7 +390,7 @@ def main(argv=None):
 
     # Save config
     args_text = yaml.safe_dump(vars(args), default_flow_style=False)
-    print(f"\n=== HSI Inpainting Configuration (method={args.method}) ===")
+    print(f"\n=== HSI Gaussian Inpainting Configuration ===")
     print(args_text)
 
     trainer = HSIInpaintingTrainer(args)
@@ -434,7 +402,7 @@ def main(argv=None):
 
     psnr, sam, ssim, training_time = trainer.train()
 
-    print(f"\n=== HSI Inpainting Result (method={args.method}) ===")
+    print(f"\n=== HSI Gaussian Inpainting Result ===")
     print(f"Dataset: {args.dataset}, Rank: {args.rank}")
     print(f"Mask: {args.mask_type}, ratio={args.mask_ratio}")
     print(f"PSNR(masked vs gt):    {trainer.psnr_masked:.4f}  (degradation baseline)")

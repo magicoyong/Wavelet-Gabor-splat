@@ -5,6 +5,17 @@ from sklearn.decomposition import NMF
 import time
 import os
 
+
+def get_dataset_prefix(dataset_name):
+    """Return the canonical filename prefix for a dataset."""
+    name_map = {
+        "urban": "Urban",
+        "salinas": "Salinas",
+        "jasperridge": "JR",
+        "paviau": "PaviaU",
+    }
+    return name_map.get(dataset_name.lower(), dataset_name)
+
 def load_dataset(name):
     """Load and normalize hyperspectral dataset."""
     name = name.lower()
@@ -43,10 +54,16 @@ def nmf_initialization(I, rank, dataset_name):
     endmember = nmf.fit_transform(I).T  # shape (rank, channels)
     abundance = nmf.components_.T       # shape (H*W, rank)
 
+    prefix = get_dataset_prefix(dataset_name)
     os.makedirs("HSI/init", exist_ok=True)
-    np.save(f"HSI/init/{dataset_name}_endmember_rank_{rank}_NMF.npy", endmember)
-    np.save(f"HSI/init/{dataset_name}_abundance_rank_{rank}_NMF.npy", abundance)
-    print(f"Saved NMF initialization results for {dataset_name}.")
+    np.save(f"HSI/init/{prefix}_endmember_rank_{rank}_NMF.npy", endmember)
+    np.save(f"HSI/init/{prefix}_endmember_rank_{rank}.npy", endmember)
+    np.save(f"HSI/init/{prefix}_abundance_rank_{rank}_NMF.npy", abundance)
+    np.save(f"HSI/init/{prefix}_abundance_rank_{rank}.npy", abundance)
+    print(
+        f"Saved NMF initialization results for {dataset_name} "
+        f"using canonical prefix {prefix}."
+    )
 
 
 def main():

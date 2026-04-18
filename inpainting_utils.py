@@ -1,5 +1,5 @@
 """
-Utility functions for Gabor/Gaussian-based image inpainting.
+Utility functions for Gaussian-based image inpainting.
 
 Provides mask generation, masked fidelity losses, regularization terms,
 and visualization helpers. Does NOT modify the original utils.py.
@@ -206,16 +206,6 @@ def compute_inpainting_psnrs(pred, target, observed_mask):
 # ---------------------------------------------------------------------------
 # Regularization
 # ---------------------------------------------------------------------------
-
-def gabor_weights_l2_reg(model):
-    """L2 sparsity regularization on gabor_weights (after sigmoid)."""
-    return model.get_gabor_weights.abs().mean()
-
-
-def gabor_freq_l1_reg(model):
-    """L1 regularization on gabor frequency for stable frequecy fitting."""
-    return model.get_gabor_freqs.abs().mean()
-
 
 def cholesky_l2_reg(model):
     """L2 regularization on Cholesky parameters for covariance stability."""
