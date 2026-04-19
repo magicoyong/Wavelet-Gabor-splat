@@ -2,8 +2,11 @@
 HSI Low-Rank Gabor Inpainting Model.
 
 Renders abundance maps A (H, W, rank) via multi-channel Gabor splatting,
-then reconstructs HSI via Y_hat = A @ E where E is the NMF endmember matrix.
-Loss is computed in HSI space on observed pixels.
+then reconstructs HSI via Y_hat = A @ E_hat where:
+    E_hat = E0 + gamma * (U @ V)
+E0 is the masked-NMF initial endmember (frozen buffer).
+U (rank, calib_rank) and V (calib_rank, C) are trainable low-rank
+correction parameters.  gamma is a fixed scalar hyperparameter.
 """
 
 from gsplat.project_gaussians_2d import project_gaussians_2d
@@ -22,7 +25,8 @@ class GaussianImage_Cholesky_HSI(nn.Module):
 
     Parameters are Gaussian positions, Cholesky covariance, per-Gaussian
     abundance features (rank channels), and Gabor frequency modulation.
-    The endmember matrix E maps abundance to HSI channels.
+    The endmember matrix E_hat = E0 + gamma * (U @ V) maps abundance to
+    HSI channels.
     """
 
     def __init__(self, loss_type="L2", **kwargs):
@@ -40,18 +44,35 @@ class GaussianImage_Cholesky_HSI(nn.Module):
         )
         self.device = kwargs["device"]
 
-        # Endmember matrix E: (rank, C), frozen (not optimized)
+        # ── Endmember calibration ───────────────────────────────────────
+        # E0: frozen masked-NMF initial endmember (rank, C)
         E_np = kwargs["E"]  # numpy array (rank, C)
-        self.register_buffer('endmember', torch.tensor(E_np, dtype=torch.float32))
+        self.register_buffer('E0', torch.tensor(E_np, dtype=torch.float32))
 
-        # Learnable Gaussian parameters
+        # Low-rank correction: E_hat = E0 + gamma * (U @ V)
+        self.calib_rank = kwargs.get("calib_rank", 2)
+        self.gamma = kwargs.get("gamma", 0.1)
+        self.freeze_endmember_calibration = kwargs.get(
+            "freeze_endmember_calibration", False
+        )
+
+        # U: (rank, calib_rank),  V: (calib_rank, C)
+        # Initialised to zero so E_hat == E0 at the start of training.
+        self.calib_U = nn.Parameter(
+            torch.zeros(self.rank, self.calib_rank, dtype=torch.float32)
+        )
+        self.calib_V = nn.Parameter(
+            torch.zeros(self.calib_rank, self.C, dtype=torch.float32)
+        )
+
+        # ── Learnable Gaussian parameters ───────────────────────────────
         self._xyz = nn.Parameter(torch.atanh(2 * (torch.rand(self.init_num_points, 2) - 0.5)))
         self._cholesky = nn.Parameter(torch.rand(self.init_num_points, 3))
         self.register_buffer('_opacity', torch.ones((self.init_num_points, 1)))
-        # Abundance features: (N, rank) instead of (N, 3)
+        # Abundance features: (N, rank)
         self._features_dc = nn.Parameter(torch.rand(self.init_num_points, self.rank))
 
-        # Gabor parameters
+        # ── Gabor parameters ────────────────────────────────────────────
         self.num_gabor = kwargs.get("num_gabor", 2)
         self.gabor_freqs = nn.Parameter(
             (torch.rand(self.init_num_points * self.num_gabor, 2) - 0.5) * 4
@@ -65,7 +86,7 @@ class GaussianImage_Cholesky_HSI(nn.Module):
         self.register_buffer('bound', torch.tensor([0.5, 0.5]).view(1, 2))
         self.register_buffer('cholesky_bound', torch.tensor([0.5, 0, 0.5]).view(1, 3))
 
-        # Optimizer
+        # ── Optimizer ───────────────────────────────────────────────────
         self.lr = kwargs["lr"]
         if kwargs.get("opt_type", "adan") == "adam":
             self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
@@ -74,6 +95,31 @@ class GaussianImage_Cholesky_HSI(nn.Module):
         self.scheduler = torch.optim.lr_scheduler.StepLR(
             self.optimizer, step_size=20000, gamma=0.5
         )
+
+    # ── Endmember interface ─────────────────────────────────────────────
+
+    def get_calibrated_endmember(self):
+        """Return E_hat = clamp(E0 + gamma * U @ V, min=eps).
+
+        If *freeze_endmember_calibration* is True, returns E0 directly
+        (still clamped for safety).
+
+        Returns:
+            Tensor of shape (rank, C).
+        """
+        if self.freeze_endmember_calibration:
+            return torch.clamp(self.E0, min=1e-6)
+        delta_E = self.calib_U @ self.calib_V  # (rank, C)
+        E_hat = self.E0 + self.gamma * delta_E
+        return torch.clamp(E_hat, min=1e-6)
+
+    def get_delta_E_norm(self):
+        """Return Frobenius norm of the correction term U @ V."""
+        with torch.no_grad():
+            delta = self.calib_U @ self.calib_V
+            return delta.norm().item()
+
+    # ── Properties ──────────────────────────────────────────────────────
 
     @property
     def get_xyz(self):
@@ -103,18 +149,21 @@ class GaussianImage_Cholesky_HSI(nn.Module):
     def get_num_gabor(self):
         return self.num_gabor
 
+    # ── Forward ─────────────────────────────────────────────────────────
+
     def forward(self):
-        """Render abundance maps via Gabor splatting.
+        """Render abundance maps via Gabor splatting, reconstruct HSI.
 
         Returns:
             dict with:
-                "abundance": (H, W, rank) abundance map
-                "render": (1, C, H, W) HSI reconstruction Y_hat = A @ E
+                "abundance": (H, W, rank) abundance map (non-negative)
+                "render": (1, C, H, W) HSI reconstruction Y_hat = A_hat @ E_hat
+                "E_hat": (rank, C) calibrated endmember used for this forward
         """
         self.xys, depths, self.radii, conics, num_tiles_hit = project_gaussians_2d(
             self.get_xyz, self.get_cholesky_elements, self.H, self.W, self.tile_bounds
         )
-        # Multi-channel Gabor rendering: (H, W, rank)
+        # Multi-channel Gabor rendering → abundance: (H, W, rank)
         out_abundance = rasterize_gabor_sum_nd(
             self.xys, depths, self.radii, conics, num_tiles_hit,
             self.get_features, self._opacity,
@@ -123,48 +172,14 @@ class GaussianImage_Cholesky_HSI(nn.Module):
             self.H, self.W, self.BLOCK_H, self.BLOCK_W,
             background=self.background, return_alpha=False,
         )
-        out_abundance = torch.clamp(out_abundance, min=0)  # (H, W, rank), non-negative only
+        out_abundance = torch.clamp(out_abundance, min=0)  # (H, W, rank), non-negative
 
-        # HSI reconstruction: A @ E -> (H, W, C)
+        # Calibrated endmember
+        E_hat = self.get_calibrated_endmember()  # (rank, C)
+
+        # HSI reconstruction: A_hat @ E_hat → (H*W, C)
         A_flat = out_abundance.view(self.H * self.W, self.rank)  # (H*W, rank)
-        hsi_flat = A_flat @ self.endmember  # (H*W, C) = (H*W, rank) @ (rank, C)
-        # Reshape to (1, C, H, W)
+        hsi_flat = A_flat @ E_hat  # (H*W, C)
         hsi_image = hsi_flat.view(1, self.H, self.W, self.C).permute(0, 3, 1, 2).contiguous()
 
-        return {"abundance": out_abundance, "render": hsi_image}
-
-    def train_iter(self, gt_image, mask, loss_type="L2"):
-        """Single training iteration with masked HSI loss.
-
-        Args:
-            gt_image: (1, C, H, W) ground truth HSI
-            mask: (1, 1, H, W) or (1, C, H, W) binary mask, 1=observed
-            loss_type: "L1" or "L2"
-
-        Returns:
-            loss, psnr_full
-        """
-        render_pkg = self.forward()
-        image = render_pkg["render"]  # (1, C, H, W)
-
-        # Masked loss in HSI space: ||M ⊙ (X - A×E₀)||_F² / num_elements
-        masked_pred = image * mask
-        masked_gt = gt_image * mask
-        num_observed = mask.expand_as(image).sum().clamp(min=1)
-        if loss_type == "L1":
-            data_loss = (masked_pred - masked_gt).abs().sum() / num_observed
-        else:
-            data_loss = ((masked_pred - masked_gt) ** 2).sum() / num_observed
-
-        loss = data_loss
-        loss.backward()
-
-        with torch.no_grad():
-            mse_full = F.mse_loss(image, gt_image)
-            psnr_full = 10 * math.log10(1.0 / mse_full.item()) if mse_full.item() > 0 else 100.0
-
-        self.optimizer.step()
-        self.optimizer.zero_grad(set_to_none=True)
-        self.scheduler.step()
-
-        return loss, psnr_full
+        return {"abundance": out_abundance, "render": hsi_image, "E_hat": E_hat}
