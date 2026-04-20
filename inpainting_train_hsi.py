@@ -1,8 +1,9 @@
-"""\nHSI Low-Rank Gaussian Inpainting Training Entry Point.
+"""
+HSI Low-Rank Gaussian Inpainting Training Entry Point.
 
 Pipeline:
     1. Load HSI data, generate mask.
-    2. Compute E0 via masked NMF on observed pixels only.
+    2. Compute E0 via masked NMF on observed pixels only (NO GT leakage).
     3. Train GaussianImage_Cholesky_HSI with:
        - Abundance renderer (Gaussian splatting)
        - Trainable endmember calibration:  E_hat = E0 + gamma * (U @ V)
@@ -155,7 +156,7 @@ class HSIInpaintingTrainer:
         BLOCK_H, BLOCK_W = 16, 16
         from gaussianimage_cholesky_hsi import GaussianImage_Cholesky_HSI
         self.model = GaussianImage_Cholesky_HSI(
-            loss_type=args.loss_type,
+            # loss_type=args.loss_type,
             opt_type=getattr(args, 'opt_type', 'adan'),
             num_points=args.num_points,
             H=self.H, W=self.W,
