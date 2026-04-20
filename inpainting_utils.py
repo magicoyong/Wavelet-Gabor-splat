@@ -207,6 +207,7 @@ def compute_inpainting_psnrs(pred, target, observed_mask):
 # Regularization
 # ---------------------------------------------------------------------------
 
+
 def cholesky_l2_reg(model):
     """L2 regularization on Cholesky parameters for covariance stability."""
     return (model._cholesky ** 2).mean()

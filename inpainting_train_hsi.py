@@ -1,18 +1,18 @@
-"""
-HSI Low-Rank Gaussian Inpainting Training Entry Point.
+"""\nHSI Low-Rank Gaussian Inpainting Training Entry Point.
 
 Pipeline:
-    1. Load HSI data and NMF endmember E
-    2. Generate mask (random / elementwise / block)
-    3. Render abundance maps with Gaussian splatting
-    4. Reconstruct HSI via A_hat @ E
-    5. Optimize masked observation-consistency loss in HSI space
-    6. Evaluate PSNR / SSIM / SAM on full / observed / missing regions
+    1. Load HSI data, generate mask.
+    2. Compute E0 via masked NMF on observed pixels only.
+    3. Train GaussianImage_Cholesky_HSI with:
+       - Abundance renderer (Gaussian splatting)
+       - Trainable endmember calibration:  E_hat = E0 + gamma * (U @ V)
+       - Masked observation-consistency loss:
+             L = || mask * (A_hat @ E_hat - Y_obs) ||
+    4. Evaluate PSNR on full / observed / missing regions.
 
 Usage:
-    python inpainting_train_hsi.py --dataset JasperRidge \
-        --rank 10 --mask_type random --mask_ratio 0.5 \
-        --num_points 600 --iterations 8000
+    python inpainting_train_hsi.py --dataset JasperRidge --rank 10 \
+        --mask_type random --mask_ratio 0.5 --num_points 600 --iterations 8000
 """
 
 import math
@@ -36,6 +36,7 @@ from inpainting_utils import (
     get_missing_mask,
     compute_ssim_hsi,
 )
+from endmember import masked_nmf_initialization
 
 
 def load_hsi_dataset(name):
@@ -60,40 +61,10 @@ def load_hsi_dataset(name):
         I = scipy.io.loadmat("HSI/data/PaviaU.mat")['paviaU'].astype(float)
         for i in range(103):
             I[:, :, i] /= np.max(I[:, :, i])
-        I = I[-340:, :, :]
+        # I = I[-340:, :, :]
     else:
         raise ValueError(f"Unknown HSI dataset: {name}")
     return I  # (H, W, C)
-
-
-def load_endmember(dataset_name, rank):
-    """Load NMF endmember matrix. Returns (rank, C) numpy array."""
-    name_map = {
-        "urban": "Urban",
-        "salinas": "Salinas",
-        "jasperridge": "JR",
-        "paviau": "PaviaU",
-    }
-    canonical_prefix = name_map.get(dataset_name.lower(), dataset_name)
-    candidate_prefixes = []
-    for prefix in [canonical_prefix, dataset_name, dataset_name.lower()]:
-        if prefix not in candidate_prefixes:
-            candidate_prefixes.append(prefix)
-
-    tried_paths = []
-    for prefix in candidate_prefixes:
-        for suffix in ["_NMF.npy", ".npy"]:
-            path = Path(f"HSI/init/{prefix}_endmember_rank_{rank}{suffix}")
-            tried_paths.append(str(path))
-            if path.exists():
-                return np.load(path).astype(np.float32)
-
-    raise FileNotFoundError(
-        f"Endmember file not found for dataset={dataset_name}, rank={rank}.\n"
-        f"  Tried:\n    " + "\n    ".join(tried_paths) + "\n"
-        f"  Please generate it first with:\n"
-        f"    python endmember.py --dataset {dataset_name} --rank {rank}"
-    )
 
 
 def compute_sam(gt, pred):
@@ -108,26 +79,33 @@ def compute_sam(gt, pred):
     return np.mean(angles)
 
 
+def tv_loss(image):
+    """Anisotropic total variation on (1, C, H, W) tensor."""
+    diff_h = (image[:, :, 1:, :] - image[:, :, :-1, :]).abs().mean()
+    diff_w = (image[:, :, :, 1:] - image[:, :, :, :-1]).abs().mean()
+    return diff_h + diff_w
+
+
 class HSIInpaintingTrainer:
-    """Trains Gaussian splatting for HSI inpainting via low-rank decomposition."""
+    """Trains Gaussian splatting for HSI inpainting via low-rank decomposition.
+
+    E0 is obtained from masked NMF (NO GT leakage).
+    During training the model learns:
+      - Abundance renderer (Gaussian splatting)
+      - Endmember low-rank correction U, V  →  E_hat = E0 + gamma*(U@V)
+    """
 
     def __init__(self, args):
         self.device = torch.device("cuda:0")
         self.args = args
 
-        # Load HSI data
+        # ── Load HSI data ───────────────────────────────────────────────
         I_np = load_hsi_dataset(args.dataset)  # (H, W, C)
         self.H, self.W, self.C = I_np.shape
-        # Convert to (1, C, H, W) tensor
         self.gt_image = torch.tensor(I_np, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0)
         self.gt_image = torch.clamp(self.gt_image, 0, 1).to(self.device)
 
-        # Load endmember
-        E = load_endmember(args.dataset, args.rank)  # (rank, C)
-        self.rank = E.shape[0]
-        assert E.shape[1] == self.C, f"Endmember channels {E.shape[1]} != HSI channels {self.C}"
-
-        # Generate mask: (1, 1, H, W) or (1, C, H, W)
+        # ── Generate mask ───────────────────────────────────────────────
         self.mask = generate_mask(
             self.H, self.W,
             mask_type=args.mask_type,
@@ -140,20 +118,40 @@ class HSIInpaintingTrainer:
         self.observed_image = self.gt_image * self.mask
         self.missing_mask = get_missing_mask(self.mask)
 
-        # Baseline PSNR
+        # Baseline PSNR (masked input vs GT)
         mse_masked = F.mse_loss(self.observed_image, self.gt_image)
-        self.psnr_masked = 10 * math.log10(1.0 / mse_masked.item()) if mse_masked.item() > 0 else float('inf')
+        self.psnr_masked = (
+            10 * math.log10(1.0 / mse_masked.item())
+            if mse_masked.item() > 0 else float('inf')
+        )
 
-        # Output directory
-        tag = f"GaussianHSI_{args.iterations}_{args.num_points}_rank{args.rank}"
+        # ── Masked NMF for E0  (NO GT leakage) ─────────────────────────
+        print("Computing E0 via masked NMF (observed pixels only) ...")
+        mask_np = self.mask.cpu().numpy()   # (1,1,H,W) or (1,C,H,W)
+        E0, A0 = masked_nmf_initialization(
+            I_np, mask_np, args.rank,
+            dataset_name=args.dataset, save=False,
+            max_iter=getattr(args, 'nmf_max_iter', 12000),
+        )
+        self.rank = E0.shape[0]
+        assert E0.shape[1] == self.C
+
+        # ── Output directory ────────────────────────────────────────────
+        calib_tag = (
+            f"calib{args.calib_rank}_g{args.gamma}"
+            if not args.freeze_endmember_calibration
+            else "E0only"
+        )
         self.log_dir = Path(
             f"./checkpoints_inpainting_hsi/{args.dataset}/"
-            f"{args.mask_type}_{args.mask_ratio}/{tag}"
+            f"{args.mask_type}_{args.mask_ratio}/"
+            f"GaussianHSI_{args.iterations}_{args.num_points}"
+            f"_rank{args.rank}_{calib_tag}"
         )
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.logwriter = LogWriter(self.log_dir)
 
-        # Build model
+        # ── Build model ─────────────────────────────────────────────────
         BLOCK_H, BLOCK_W = 16, 16
         from gaussianimage_cholesky_hsi import GaussianImage_Cholesky_HSI
         self.model = GaussianImage_Cholesky_HSI(
@@ -162,7 +160,10 @@ class HSIInpaintingTrainer:
             num_points=args.num_points,
             H=self.H, W=self.W,
             rank=self.rank, C=self.C,
-            E=E,
+            E=E0,
+            calib_rank=args.calib_rank,
+            gamma=args.gamma,
+            freeze_endmember_calibration=args.freeze_endmember_calibration,
             BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
             device=self.device,
             lr=args.lr,
@@ -182,26 +183,17 @@ class HSIInpaintingTrainer:
         render_pkg = self.model.forward()
         image = render_pkg["render"]  # (1, C, H, W)
 
-        # Masked loss in HSI space: ||M ⊙ (X - A×E₀)||_F² / num_observed_elements
+        # Masked data fidelity: ||M ⊙ (Y_hat - Y_obs)||
         masked_pred = image * self.mask
         masked_gt = self.gt_image * self.mask
-        num_observed = self.mask.expand_as(image).sum().clamp(min=1)
 
-        if self.args.loss_type == "L1":
-            data_loss = (masked_pred - masked_gt).abs().sum() / num_observed
-        else:
-            data_loss = ((masked_pred - masked_gt) ** 2).sum() / num_observed
+        
+        data_loss = ((masked_pred - masked_gt) ** 2).mean() 
 
-        # Optional TV regularization
-        reg_loss = torch.tensor(0.0, device=self.device)
-        if getattr(self.args, 'lambda_tv', 0) > 0:
-            # TV on abundance map
-            A = render_pkg["abundance"]  # (H, W, rank)
-            tv_h = (A[1:, :, :] - A[:-1, :, :]).pow(2).mean()
-            tv_w = (A[:, 1:, :] - A[:, :-1, :]).pow(2).mean()
-            reg_loss = reg_loss + self.args.lambda_tv * (tv_h + tv_w)
-
-        loss = data_loss + reg_loss
+        loss = data_loss
+        tv_w = getattr(self.args, 'tv_weight', 0.0)
+        if tv_w > 0:
+            loss = loss + tv_w * tv_loss(image)
         loss.backward()
 
         self.model.optimizer.step()
@@ -216,6 +208,7 @@ class HSIInpaintingTrainer:
             psnr_metrics["psnr_full"],
             psnr_metrics["psnr_observed"],
             psnr_metrics["psnr_missing"],
+            self.model.get_delta_E_norm(),
         )
 
     def evaluate(self):
@@ -234,7 +227,9 @@ class HSIInpaintingTrainer:
 
             # SSIM (per-band mean)
             ssim_value = compute_ssim_hsi(image, self.gt_image)
-        return psnr_metrics, sam_value, ssim_value, image, abundance
+
+            delta_norm = self.model.get_delta_E_norm()
+        return psnr_metrics, sam_value, ssim_value, image, abundance, delta_norm
 
     def train(self):
         """Full HSI inpainting training loop."""
@@ -247,7 +242,7 @@ class HSIInpaintingTrainer:
         best_model_dict = None
 
         for it in range(1, self.args.iterations + 1):
-            loss, psnr_gt, psnr_obs, psnr_missing = self.train_step(it)
+            loss, psnr_gt, psnr_obs, psnr_missing, delta_norm = self.train_step(it)
             psnr_gt_list.append(psnr_gt)
             psnr_obs_list.append(psnr_obs)
             psnr_missing_list.append(psnr_missing)
@@ -263,6 +258,7 @@ class HSIInpaintingTrainer:
                         "PSNR(gt)": f"{psnr_gt:.4f}",
                         "PSNR(obs)": f"{psnr_obs:.4f}",
                         "PSNR(miss)": f"{psnr_missing:.4f}",
+                        "delta E": f"{delta_norm:.6f}",
                     })
                     progress_bar.update(10)
 
@@ -270,17 +266,24 @@ class HSIInpaintingTrainer:
         progress_bar.close()
 
         # Final evaluation (last model)
-        psnr_metrics, sam_value, ssim_value, reconstruction, abundance = self.evaluate()
+        psnr_metrics, sam_value, ssim_value, reconstruction, abundance, dn = self.evaluate()
 
         # Also evaluate best model
         if best_model_dict is not None:
             self.model.load_state_dict(best_model_dict)
-        best_metrics, best_sam, best_ssim, best_recon, best_abundance = self.evaluate()
+        best_metrics, best_sam, best_ssim, best_recon, best_abundance, best_dn = self.evaluate()
+
+        calib_info = (
+            f"  Calibration: freeze={self.args.freeze_endmember_calibration}, "
+            f"calib_rank={self.args.calib_rank}, gamma={self.args.gamma}\n"
+            f"  ||U@V|| (best):           {best_dn:.6f}\n"
+        )
 
         self.logwriter.write(
             f"HSI Inpainting Complete in {end_time:.4f}s\n"
             f"  Dataset: {self.args.dataset}, Rank: {self.rank}, C: {self.C}\n"
             f"  Mask: {self.args.mask_type}, ratio={self.args.mask_ratio}\n"
+            + calib_info +
             f"  PSNR(masked vs gt):        {self.psnr_masked:.4f}  (degradation baseline)\n"
             f"  PSNR(recon vs gt):         {psnr_metrics['psnr_full']:.4f}\n"
             f"  PSNR(recon_obs):           {psnr_metrics['psnr_observed']:.4f}\n"
@@ -296,6 +299,12 @@ class HSIInpaintingTrainer:
         # Save models
         torch.save(self.model.state_dict(), self.log_dir / "gaussian_model.pth.tar")
         torch.save(best_model_dict, self.log_dir / "gaussian_model.best.pth.tar")
+
+        # Save E0 and calibrated E_hat for analysis
+        np.save(self.log_dir / "E0_maskedNMF.npy", self.model.E0.cpu().numpy())
+        with torch.no_grad():
+            E_hat_np = self.model.get_calibrated_endmember().cpu().numpy()
+        np.save(self.log_dir / "E_hat_calibrated.npy", E_hat_np)
 
         # Save abundance map
         np.save(
@@ -319,10 +328,14 @@ class HSIInpaintingTrainer:
             "best_sam": best_sam,
             "ssim": ssim_value,
             "best_ssim": best_ssim,
+            "delta_E_norm": best_dn,
             "dataset": self.args.dataset,
             "rank": self.rank,
             "mask_type": self.args.mask_type,
             "mask_ratio": self.args.mask_ratio,
+            "calib_rank": self.args.calib_rank,
+            "gamma": self.args.gamma,
+            "freeze_endmember_calibration": self.args.freeze_endmember_calibration,
         })
 
         return best_metrics["psnr_full"], best_sam, best_ssim, end_time
@@ -355,16 +368,24 @@ def parse_args(argv=None):
                         help="Number of training iterations.")
     parser.add_argument("--lr", type=float, default=5e-3,
                         help="Learning rate.")
-    parser.add_argument("--loss_type", type=str, default="L2",
-                        choices=["L1", "L2"],
-                        help="Fidelity loss type.")
     parser.add_argument("--opt_type", type=str, default="adan",
                         choices=["adam", "adan"],
                         help="Optimizer type.")
 
-    # Regularization
-    parser.add_argument("--lambda_tv", type=float, default=0.0,
-                        help="TV regularization weight on abundance map.")
+    # Endmember calibration
+    parser.add_argument("--calib_rank", type=int, default=2,
+                        help="Rank of low-rank endmember correction (U@V).")
+    parser.add_argument("--gamma", type=float, default=0.1,
+                        help="Scaling factor for endmember correction: "
+                             "E_hat = E0 + gamma*(U@V).")
+    parser.add_argument("--freeze_endmember_calibration", action="store_true",
+                        help="If set, only use E0 (no calibration). "
+                             "Ablation switch.")
+    parser.add_argument("--nmf_max_iter", type=int, default=12000,
+                        help="Max iterations for masked NMF.")
+    parser.add_argument("--tv_weight", type=float, default=0.0,
+                        help="Weight for total-variation regularisation on the "
+                             "reconstructed image. 0 = disabled.")
 
     # Misc
     parser.add_argument("--model_path", type=str, default=None,
@@ -390,7 +411,7 @@ def main(argv=None):
 
     # Save config
     args_text = yaml.safe_dump(vars(args), default_flow_style=False)
-    print(f"\n=== HSI Gaussian Inpainting Configuration ===")
+    print(f"\n=== HSI Inpainting Configuration ===")
     print(args_text)
 
     trainer = HSIInpaintingTrainer(args)
@@ -402,9 +423,11 @@ def main(argv=None):
 
     psnr, sam, ssim, training_time = trainer.train()
 
-    print(f"\n=== HSI Gaussian Inpainting Result ===")
+    print(f"\n=== HSI Inpainting Result ===")
     print(f"Dataset: {args.dataset}, Rank: {args.rank}")
     print(f"Mask: {args.mask_type}, ratio={args.mask_ratio}")
+    print(f"Calibration: freeze={args.freeze_endmember_calibration}, "
+          f"calib_rank={args.calib_rank}, gamma={args.gamma}")
     print(f"PSNR(masked vs gt):    {trainer.psnr_masked:.4f}  (degradation baseline)")
     print(f"Best PSNR(recon vs gt): {psnr:.4f}")
     print(f"Best SAM:               {sam:.4f}")

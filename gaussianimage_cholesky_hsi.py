@@ -5,8 +5,9 @@ Renders abundance maps A (H, W, rank) via standard Gaussian splatting
 (rasterize_gaussians_sum), then reconstructs HSI via Y_hat = A @ E
 where E is the NMF endmember matrix.
 
-Supports arbitrary rank determined by endmember.shape[0]; no hardcoded
-feature dimension splits or quantization logic.
+IMPORTANT: The CUDA kernels rasterize_sum_forward / nd_rasterize_sum_forward
+only support exactly 3 (float3) or 4 (float4) channels. Features must be
+split into chunks of 3 or 4 before rasterization.
 """
 
 from gsplat.project_gaussians_2d import project_gaussians_2d
@@ -16,15 +17,43 @@ import torch.nn as nn
 from optimizer import Adan
 
 
+def _safe_chunk_sizes(rank):
+    """Return a tuple of chunk sizes (each 3 or 4) that sum to rank.
+
+    The rasterize_gaussians_sum CUDA kernel only supports 3 (float3) or
+    4 (float4) channels.  This function computes a valid partition.
+    """
+    if rank <= 0:
+        return ()
+    if rank in (1, 2):
+        return (3,)  # must pad features to 3
+    # 3a + 4b = rank, a >= 0, b >= 0
+    b, r = divmod(rank, 4)
+    if r == 0:
+        return (4,) * b
+    elif r == 3:
+        return (4,) * b + (3,)
+    elif r == 2:
+        # 4 + 2 -> 3 + 3
+        return (4,) * (b - 1) + (3, 3) if b >= 1 else (3,) * (rank // 3) + ((rank % 3,) if rank % 3 else ())
+    else:  # r == 1
+        if b >= 2:
+            # 4 + 4 + 1 -> 3 + 3 + 3
+            return (4,) * (b - 2) + (3, 3, 3)
+        else:
+            # rank = 5 (b=1,r=1): pad to 6 = 3+3 (caller must pad features)
+            # rank = 1 (b=0,r=1): pad to 3 (caller must pad features)
+            padded = rank + (3 - rank % 3) % 3
+            return _safe_chunk_sizes(padded)
+
+
 class GaussianImage_Cholesky_HSI(nn.Module):
     """Gaussian splatting model for HSI inpainting via low-rank decomposition.
 
     Core pipeline:
         1. Project 2D Gaussians: position (tanh-mapped) + Cholesky covariance
-        2. Rasterize abundance maps: (H, W, rank) via rasterize_gaussians_sum
+        2. Rasterize abundance maps in 3/4-channel chunks
         3. Reconstruct HSI: Y_hat = A @ E  where A is (H*W, rank), E is (rank, C)
-
-    Supports arbitrary rank. No quantization.
     """
 
     def __init__(self, loss_type="L2", **kwargs):
@@ -42,6 +71,10 @@ class GaussianImage_Cholesky_HSI(nn.Module):
         )
         self.device = kwargs["device"]
 
+        # Pre-compute safe chunk sizes for feature splitting
+        self._chunk_sizes = _safe_chunk_sizes(self.rank)
+        self._padded_rank = sum(self._chunk_sizes)  # may exceed rank if padding needed
+
         # Endmember matrix E: (rank, C), frozen (not optimized)
         E_np = kwargs["E"]  # numpy array (rank, C)
         self.register_buffer('endmember', torch.tensor(E_np, dtype=torch.float32))
@@ -50,9 +83,9 @@ class GaussianImage_Cholesky_HSI(nn.Module):
         self._xyz = nn.Parameter(
             torch.atanh(2 * (torch.rand(self.init_num_points, 2) - 0.5))
         )
-        self._cholesky = nn.Parameter(torch.rand(self.init_num_points, 3))
+        self._cholesky = nn.Parameter(torch.zeros(self.init_num_points, 3))
         self.register_buffer('_opacity', torch.ones((self.init_num_points, 1)))
-        # Abundance features: (N, rank) — arbitrary rank, no splits
+        # Abundance features: (N, rank)
         self._features_dc = nn.Parameter(
             0.5 * torch.rand(self.init_num_points, self.rank)
         )
@@ -70,11 +103,11 @@ class GaussianImage_Cholesky_HSI(nn.Module):
         else:
             self.optimizer = Adan(self.parameters(), lr=self.lr)
         self.scheduler = torch.optim.lr_scheduler.StepLR(
-            self.optimizer, step_size=20000, gamma=0.5
+            self.optimizer, step_size=3000, gamma=0.5
         )
 
     # ------------------------------------------------------------------
-    # Properties (same interface as the Gabor model for interoperability)
+    # Properties
     # ------------------------------------------------------------------
 
     @property
@@ -100,9 +133,12 @@ class GaussianImage_Cholesky_HSI(nn.Module):
     def forward(self):
         """Render abundance maps via Gaussian splatting, then reconstruct HSI.
 
+        Features are split into chunks of 3 or 4 for the CUDA kernel,
+        then concatenated.
+
         Returns:
             dict with:
-                "abundance": (H, W, rank) abundance map (non-negative)
+                "abundance": (H, W, rank) abundance map (clamped to [0, 1])
                 "render":    (1, C, H, W) HSI reconstruction  Y_hat = A @ E
         """
         self.xys, depths, self.radii, conics, num_tiles_hit = \
@@ -111,18 +147,39 @@ class GaussianImage_Cholesky_HSI(nn.Module):
                 self.H, self.W, self.tile_bounds,
             )
 
-        # Gaussian splatting — render all rank channels at once
-        out_abundance = rasterize_gaussians_sum(
-            self.xys, depths, self.radii, conics, num_tiles_hit,
-            self.get_features,          # (N, rank)
-            self._opacity,              # (N, 1)
-            self.H, self.W,
-            self.BLOCK_H, self.BLOCK_W,
-            background=self.background,  # (rank,)
-            return_alpha=False,
-        )  # -> (H, W, rank)
+        # Pad features if needed (for ranks like 5 that need padding)
+        features = self.get_features
+        if self._padded_rank > self.rank:
+            pad = torch.zeros(
+                features.shape[0], self._padded_rank - self.rank,
+                device=features.device, dtype=features.dtype,
+            )
+            features = torch.cat([features, pad], dim=1)
 
-        out_abundance = torch.clamp(out_abundance, min=0)  # non-negative
+        # Split features into safe chunks (each 3 or 4)
+        features_split = torch.split(features, list(self._chunk_sizes), dim=1)
+
+        # Rasterize each chunk separately
+        out_chunks = []
+        for chunk in features_split:
+            out = rasterize_gaussians_sum(
+                self.xys, depths, self.radii, conics, num_tiles_hit,
+                chunk,
+                self._opacity,
+                self.H, self.W,
+                self.BLOCK_H, self.BLOCK_W,
+                return_alpha=False,
+            )
+            out_chunks.append(out)
+
+        # Concatenate along channel dimension: (H, W, padded_rank)
+        out_abundance = torch.cat(out_chunks, dim=2)
+
+        # Remove padding channels if any
+        if self._padded_rank > self.rank:
+            out_abundance = out_abundance[:, :, :self.rank]
+
+        out_abundance = torch.clamp(out_abundance, 0, 1)  # [0, 1]
 
         # HSI reconstruction: A @ E -> (H*W, C)
         A_flat = out_abundance.view(self.H * self.W, self.rank)
