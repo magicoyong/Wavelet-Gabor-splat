@@ -40,62 +40,46 @@ def loss_fn(pred, target, loss_type='L2', lambda_value=0.7):
         loss = lambda_value * F.l1_loss(pred, target) + (1-lambda_value)  * (1 - ms_ssim(pred, target, data_range=1, size_average=True, win_size=5))
     return loss
 
-def get_dwt_subbands(x: torch.Tensor) -> dict:
-        """Get all DWT subbands using pytorch_wavelets package.
-        
-        Args:
-            x: (N, C, H, W) input tensor
-            
-        Returns:
-            Dictionary with keys: 'LL1', 'LH1', 'HL1', 'HH1', 'LL2', 'LH2', 'HL2', 'HH2'
-        """
-        device = x.device
-        dtype = x.dtype
-        
-        # Initialize DWT for 2 levels using Haar (db1) wavelet
-        # J=2 means it computes Level 1 and Level 2
-        # mode='symmetric' is similar to reflect padding
-        dwt = DWTForward(J=2, mode='symmetric', wave='db1').to(device)
-        
-        # Yl is the low-pass coefficients at the coarsest level (LL2)
-        # Yh is a list of high-pass coefficients at each level (fine to coarse)
-        # Yh[0] contains (LH1, HL1, HH1)
-        # Yh[1] contains (LH2, HL2, HH2)
-        Yl, Yh = dwt(x)
-        
-        LL2 = Yl
-        
-        # Level 1 high-pass
-        LH1, HL1, HH1 = Yh[0][:,:,0,:,:], Yh[0][:,:,1,:,:], Yh[0][:,:,2,:,:]
-        
-        # Level 2 high-pass
-        LH2, HL2, HH2 = Yh[1][:,:,0,:,:], Yh[1][:,:,1,:,:], Yh[1][:,:,2,:,:]
-        
-        # To get LL1, we can run 1-level DWT 
-        dwt1 = DWTForward(J=1, mode='symmetric', wave='db1').to(device)
-        
-        # Level 1
-        LL1, Yh1 = dwt1(x)
-        LH1, HL1, HH1 = Yh1[0][:,:,0,:,:], Yh1[0][:,:,1,:,:], Yh1[0][:,:,2,:,:]
-        
-        # Level 2 (input is LL1)
-        LL2, Yh2 = dwt1(LL1)
-        LH2, HL2, HH2 = Yh2[0][:,:,0,:,:], Yh2[0][:,:,1,:,:], Yh2[0][:,:,2,:,:]
-        
-        return {
-            'LL1': LL1, 'LH1': LH1, 'HL1': HL1, 'HH1': HH1,
-            'LL2': LL2, 'LH2': LH2, 'HL2': HL2, 'HH2': HH2,
-        }
+def _ensure_nchw(image: torch.Tensor) -> torch.Tensor:
+    """Normalize image tensors to NCHW for wavelet losses."""
+    if image.dim() == 3:
+        image = image.unsqueeze(0)
+    if image.dim() != 4:
+        raise ValueError(f"Expected a CHW or NCHW tensor, got shape {tuple(image.shape)}")
+    return image
 
-def dwt_loss (image): #, lambda_value):
-   # Ensure batch dimension
-    pred_batched = image.unsqueeze(0) if image.dim() == 3 else image
-            
+def get_dwt_subbands(x: torch.Tensor) -> dict:
+    """Get all DWT subbands for an NCHW tensor.
+
+    DWTForward processes each channel independently, so this works for
+    RGB, hyperspectral, or any other multi-channel image tensor.
+    """
+    x = _ensure_nchw(x)
+    device = x.device
+
+    # Use two recursive 1-level transforms so LL1/LL2 are explicit.
+    dwt1 = DWTForward(J=1, mode='symmetric', wave='db1').to(device)
+
+    LL1, Yh1 = dwt1(x)
+    LH1, HL1, HH1 = Yh1[0][:,:,0,:,:], Yh1[0][:,:,1,:,:], Yh1[0][:,:,2,:,:]
+
+    LL2, Yh2 = dwt1(LL1)
+    LH2, HL2, HH2 = Yh2[0][:,:,0,:,:], Yh2[0][:,:,1,:,:], Yh2[0][:,:,2,:,:]
+
+    return {
+        'LL1': LL1, 'LH1': LH1, 'HL1': HL1, 'HH1': HH1,
+        'LL2': LL2, 'LH2': LH2, 'HL2': HL2, 'HH2': HH2,
+    }
+
+def dwt_loss(image):
+    """Wavelet regularizer that supports multi-channel images."""
+    image_batched = _ensure_nchw(image)
+
     # Get all DWT subbands
-    pred_bands = get_dwt_subbands(pred_batched)
-            
-    # Compute Charbonnier losses for all subbands
-    total_dwt_loss = 0.0
+    pred_bands = get_dwt_subbands(image_batched)
+
+    # Compute Charbonnier-style energy on selected subbands
+    total_dwt_loss = image_batched.new_zeros(())
     lambda_value = {
         "dwt_ll1_weight": 0.0, "dwt_lh1_weight": 0.5,
         "dwt_hl1_weight": 0.5, "dwt_hh1_weight": 1.0,

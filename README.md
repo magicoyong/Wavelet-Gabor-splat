@@ -119,3 +119,22 @@ Results are saved to `checkpoints_inpainting/<mask_type>_<mask_ratio>/<model_con
 pytest test_inpainting.py -v
 ```
 
+## HSI Inpainting
+
+HSI 训练入口使用统一的 --dataset 参数。它同时支持内置 HSI 数据集名称、四个多光谱场景短名，以及直接传入场景目录路径。
+
+```bash
+# Built-in HSI datasets
+python inpainting_train_hsi.py --dataset Urban
+python inpainting_train_hsi.py --dataset JasperRidge
+
+# Multispectral scene short names under HSI/
+python inpainting_train_hsi.py --dataset beads_ms
+python inpainting_train_hsi.py --dataset chart_and_stuffed_toy_ms
+python inpainting_train_hsi.py --dataset feathers_ms
+python inpainting_train_hsi.py --dataset flowers_ms
+
+# Directory path also works
+python inpainting_train_hsi.py --dataset HSI/beads_ms
+```
+

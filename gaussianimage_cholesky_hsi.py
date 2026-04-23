@@ -6,7 +6,8 @@ then reconstructs HSI via Y_hat = A @ E_hat where:
     E_hat = E0 + gamma * (U @ V)
 E0 is the masked-NMF initial endmember (frozen buffer).
 U (rank, calib_rank) and V (calib_rank, C) are trainable low-rank
-correction parameters.  gamma is a fixed scalar hyperparameter.
+correction parameters.  gamma is a learnable scalar bounded by
+max_calib_scale:  gamma = max_calib_scale * tanh(calib_gamma).
 """
 
 from gsplat.project_gaussians_2d import project_gaussians_2d
@@ -49,21 +50,27 @@ class GaussianImage_Cholesky_HSI(nn.Module):
         E_np = kwargs["E"]  # numpy array (rank, C)
         self.register_buffer('E0', torch.tensor(E_np, dtype=torch.float32))
 
-        # Low-rank correction: E_hat = E0 + gamma * (U @ V)
+        # Low-rank correction: E_hat = E0 + gamma * tanh(U @ V)
         self.calib_rank = kwargs.get("calib_rank", 2)
-        self.gamma = kwargs.get("gamma", 0.1)
+        self.max_calib_scale = kwargs.get("gamma", 0.1)  # max |gamma|
         self.freeze_endmember_calibration = kwargs.get(
             "freeze_endmember_calibration", False
         )
 
         # U: (rank, calib_rank),  V: (calib_rank, C)
-        # Initialised to zero so E_hat == E0 at the start of training.
+        # Non-zero init (like refine code) so gradients can flow.
         self.calib_U = nn.Parameter(
-            torch.zeros(self.rank, self.calib_rank, dtype=torch.float32)
+            torch.empty(self.rank, self.calib_rank, dtype=torch.float32)
         )
         self.calib_V = nn.Parameter(
-            torch.zeros(self.calib_rank, self.C, dtype=torch.float32)
+            torch.empty(self.calib_rank, self.C, dtype=torch.float32)
         )
+        # Learnable gamma: starts at 0 so E_hat ≈ E0 initially,
+        # but U/V have non-zero init so gradients are non-zero.
+        self.calib_gamma = nn.Parameter(torch.tensor(0.0))
+        nn.init.kaiming_uniform_(self.calib_U, a=np.sqrt(5))
+        nn.init.kaiming_uniform_(self.calib_V, a=np.sqrt(5))
+        self.calib_V.data.mul_(1e-3)  # keep V small at init
 
         # ── Learnable Gaussian parameters ───────────────────────────────
         self._xyz = nn.Parameter(torch.atanh(2 * (torch.rand(self.init_num_points, 2) - 0.5)))
@@ -75,7 +82,7 @@ class GaussianImage_Cholesky_HSI(nn.Module):
         # ── Gabor parameters ────────────────────────────────────────────
         self.num_gabor = kwargs.get("num_gabor", 2)
         self.gabor_freqs = nn.Parameter(
-            (torch.rand(self.init_num_points * self.num_gabor, 2) - 0.5) * 4
+            (torch.rand(self.init_num_points * self.num_gabor, 2) - 0.5) * 2 # 0.002
         )
         self.gabor_weights = nn.Parameter(
             torch.rand(self.init_num_points * self.num_gabor, 1) * (-5)
@@ -109,15 +116,17 @@ class GaussianImage_Cholesky_HSI(nn.Module):
         """
         if self.freeze_endmember_calibration:
             return torch.clamp(self.E0, min=1e-6)
-        delta_E = self.calib_U @ self.calib_V  # (rank, C)
-        E_hat = self.E0 + self.gamma * delta_E
+        delta_E = torch.tanh(self.calib_U @ self.calib_V)  # (rank, C), bounded [-1,1]
+        gamma = self.max_calib_scale * torch.tanh(self.calib_gamma)  # learnable, bounded
+        E_hat = self.E0 + gamma * delta_E
         return torch.clamp(E_hat, min=1e-6)
 
     def get_delta_E_norm(self):
-        """Return Frobenius norm of the correction term U @ V."""
+        """Return Frobenius norm of the effective correction gamma * tanh(U @ V)."""
         with torch.no_grad():
-            delta = self.calib_U @ self.calib_V
-            return delta.norm().item()
+            delta = torch.tanh(self.calib_U @ self.calib_V)
+            gamma = self.max_calib_scale * torch.tanh(self.calib_gamma)
+            return (gamma * delta).norm().item()
 
     # ── Properties ──────────────────────────────────────────────────────
 
@@ -139,6 +148,8 @@ class GaussianImage_Cholesky_HSI(nn.Module):
 
     @property
     def get_gabor_freqs(self):
+        # exp
+        #return torch.exp(self.gabor_freqs)
         return self.gabor_freqs
 
     @property

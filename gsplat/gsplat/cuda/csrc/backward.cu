@@ -737,7 +737,7 @@ __global__ void rasterize_backward_sum_gabor_kernel(
                 warpSum(v_freq_y_local, warp);
 
                 if (warp.thread_rank() == 0) {
-                    //atomicAdd(v_weights + g * num_freqs + f, v_weight_local);
+                    atomicAdd(v_weights + g * num_freqs + f, v_weight_local);
                     atomicAdd(v_freqs_x + g * num_freqs + f, v_freq_x_local);
                     atomicAdd(v_freqs_y + g * num_freqs + f, v_freq_y_local);
                 }

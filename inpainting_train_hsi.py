@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 import argparse
 import copy
+import re
 import yaml
 import numpy as np
 import torch
@@ -28,20 +29,48 @@ import sys
 import random
 import torch.nn.functional as F
 import scipy.io
+from PIL import Image
 from tqdm import tqdm
 
-from utils import LogWriter
+from utils import LogWriter, dwt_loss
 from inpainting_utils import (
     generate_mask,
     compute_inpainting_psnrs,
     get_missing_mask,
     compute_ssim_hsi,
+    masked_mse_loss,
 )
-from endmember import masked_nmf_initialization
+from endmember import masked_nmf_initialization, nmf_initialization
 
 
-def load_hsi_dataset(name):
-    """Load and normalize HSI dataset. Returns (H, W, C) numpy array."""
+BUILTIN_HSI_DATASETS = {
+    "urban": "Urban",
+    "salinas": "Salinas",
+    "jasperridge": "JasperRidge",
+    "paviau": "PaviaU",
+}
+
+MULTISPECTRAL_SCENES = {
+    "beads_ms",
+    "chart_and_stuffed_toy_ms",
+    "feathers_ms",
+    "flowers_ms",
+}
+
+MS_BAND_PATTERN = re.compile(r".+_ms_(\d+)\.png$", re.IGNORECASE)
+
+
+def _normalize_band_to_unit_interval(band):
+    band = band.astype(np.float32)
+    band_min = float(band.min())
+    band_max = float(band.max())
+    if band_max > band_min:
+        return (band - band_min) / (band_max - band_min)
+    return np.zeros_like(band, dtype=np.float32)
+
+
+def _load_builtin_hsi_dataset(name):
+    """Load built-in HSI dataset. Returns (H, W, C) float array."""
     name = name.lower()
     if name == "urban":
         I = scipy.io.loadmat("HSI/data/Urban_R162.mat")['Y'].astype(float)
@@ -62,10 +91,92 @@ def load_hsi_dataset(name):
         I = scipy.io.loadmat("HSI/data/PaviaU.mat")['paviaU'].astype(float)
         for i in range(103):
             I[:, :, i] /= np.max(I[:, :, i])
-        I = I[-340:, :, :]
+        # I = I[-340:, :, :]
     else:
         raise ValueError(f"Unknown HSI dataset: {name}")
-    return I  # (H, W, C)
+    return I.astype(np.float32)
+
+
+def _load_multispectral_scene_dir(scene_dir):
+    """Load a directory of *_ms_XX.png bands into an (H, W, C) float32 cube."""
+    scene_dir = Path(scene_dir)
+    band_files = []
+    for path in scene_dir.iterdir():
+        match = MS_BAND_PATTERN.fullmatch(path.name)
+        if match is not None:
+            band_files.append((int(match.group(1)), path))
+
+    if not band_files:
+        raise ValueError(f"No multispectral band files found in: {scene_dir}")
+
+    band_files.sort(key=lambda item: item[0])
+
+    bands = []
+    expected_size = None
+    for _, band_path in band_files:
+        band = np.asarray(Image.open(band_path))
+        if band.ndim != 2:
+            raise ValueError(
+                f"Expected single-channel band image, got shape {band.shape} for {band_path}"
+            )
+        if expected_size is None:
+            expected_size = band.shape
+        elif band.shape != expected_size:
+            raise ValueError(
+                f"Band size mismatch in {scene_dir}: expected {expected_size}, got {band.shape} for {band_path.name}"
+            )
+        bands.append(_normalize_band_to_unit_interval(band))
+
+    return np.stack(bands, axis=-1).astype(np.float32)
+
+
+def resolve_hsi_dataset(dataset):
+    """Resolve --dataset to either a built-in HSI name or a multispectral scene directory."""
+    dataset_str = str(dataset).strip()
+    dataset_path = Path(dataset_str).expanduser()
+    dataset_key = dataset_str.lower()
+
+    if dataset_path.is_dir():
+        return {
+            "kind": "multispectral_dir",
+            "path": dataset_path,
+            "label": dataset_path.name,
+            "display": dataset_str,
+        }
+
+    if dataset_key in BUILTIN_HSI_DATASETS:
+        return {
+            "kind": "builtin_hsi",
+            "name": dataset_key,
+            "label": BUILTIN_HSI_DATASETS[dataset_key],
+            "display": BUILTIN_HSI_DATASETS[dataset_key],
+        }
+
+    if dataset_key in MULTISPECTRAL_SCENES:
+        scene_dir = Path("HSI") / dataset_key
+        if not scene_dir.is_dir():
+            raise FileNotFoundError(f"Multispectral scene directory not found: {scene_dir}")
+        return {
+            "kind": "multispectral_dir",
+            "path": scene_dir,
+            "label": scene_dir.name,
+            "display": dataset_key,
+        }
+
+    supported = list(BUILTIN_HSI_DATASETS.values()) + sorted(MULTISPECTRAL_SCENES)
+    raise ValueError(
+        "Unknown dataset. Supported built-ins/scenes: "
+        + ", ".join(supported)
+        + "; or pass a directory path."
+    )
+
+
+def load_hsi_dataset(name):
+    """Load and normalize HSI dataset. Returns (H, W, C) numpy array."""
+    resolved = resolve_hsi_dataset(name)
+    if resolved["kind"] == "builtin_hsi":
+        return _load_builtin_hsi_dataset(resolved["name"])
+    return _load_multispectral_scene_dir(resolved["path"])
 
 
 def compute_sam(gt, pred):
@@ -80,6 +191,13 @@ def compute_sam(gt, pred):
     return np.mean(angles)
 
 
+def tv_loss(image):
+    """Anisotropic total variation on (1, C, H, W) tensor."""
+    diff_h = (image[:, :, 1:, :] - image[:, :, :-1, :]).abs().mean()
+    diff_w = (image[:, :, :, 1:] - image[:, :, :, :-1]).abs().mean()
+    return diff_h + diff_w
+
+
 class HSIInpaintingTrainer:
     """Trains Gabor splatting for HSI inpainting via low-rank decomposition.
 
@@ -92,6 +210,8 @@ class HSIInpaintingTrainer:
     def __init__(self, args):
         self.device = torch.device("cuda:0")
         self.args = args
+        self.dataset_info = resolve_hsi_dataset(args.dataset)
+        self.dataset_label = self.dataset_info["label"]
 
         # ── Load HSI data ───────────────────────────────────────────────
         I_np = load_hsi_dataset(args.dataset)  # (H, W, C)
@@ -120,13 +240,15 @@ class HSIInpaintingTrainer:
         )
 
         # ── Masked NMF for E0  (NO GT leakage) ─────────────────────────
-        print("Computing E0 via masked NMF (observed pixels only) ...")
+        #print("Computing E0 via masked NMF (observed pixels only) ...")
         mask_np = self.mask.cpu().numpy()   # (1,1,H,W) or (1,C,H,W)
-        E0, A0 = masked_nmf_initialization(
-            I_np, mask_np, args.rank,
-            dataset_name=args.dataset, save=False,
-            max_iter=getattr(args, 'nmf_max_iter', 12000),
-        )
+        # E0, A0 = masked_nmf_initialization(
+        #     I_np, mask_np, args.rank,
+        #     mask_type=args.mask_type,
+        #     max_iter=getattr(args, 'nmf_max_iter', 12000),
+        # )
+        print("Computing E0 via direct NMF on observed pixels (no imputation) ...")
+        E0, A0 = nmf_initialization(self.observed_image, args.rank )
         self.rank = E0.shape[0]
         assert E0.shape[1] == self.C
 
@@ -137,7 +259,7 @@ class HSIInpaintingTrainer:
             else "E0only"
         )
         self.log_dir = Path(
-            f"./checkpoints_inpainting_hsi/{args.dataset}/"
+            f"./checkpoints_inpainting_hsi/{self.dataset_label}/"
             f"{args.mask_type}_{args.mask_ratio}/"
             f"GaborHSI_{args.iterations}_{args.num_points}_{args.num_gabor}"
             f"_rank{args.rank}_{calib_tag}"
@@ -149,7 +271,7 @@ class HSIInpaintingTrainer:
         BLOCK_H, BLOCK_W = 16, 16
         from gaussianimage_cholesky_hsi import GaussianImage_Cholesky_HSI
         self.model = GaussianImage_Cholesky_HSI(
-            loss_type=args.loss_type,
+            # loss_type=args.loss_type,
             opt_type=getattr(args, 'opt_type', 'adan'),
             num_points=args.num_points,
             H=self.H, W=self.W,
@@ -179,15 +301,16 @@ class HSIInpaintingTrainer:
         image = render_pkg["render"]  # (1, C, H, W)
 
         # Masked data fidelity: ||M ⊙ (Y_hat - Y_obs)||
-        masked_pred = image * self.mask
-        masked_gt = self.gt_image * self.mask
-
-        if self.args.loss_type == "L1":
-            data_loss = (masked_pred - masked_gt).abs().sum() 
-        else:
-            data_loss = ((masked_pred - masked_gt) ** 2).sum() 
+        data_loss = masked_mse_loss(image, self.gt_image, self.mask)
+        loss = data_loss
 
         loss = data_loss
+        tv_w = getattr(self.args, 'tv_weight', 0.0)
+        if tv_w > 0:
+            loss = loss + tv_w * tv_loss(image)
+        dwt_w = getattr(self.args, 'dwt_weight', 0.0)
+        if dwt_w > 0:
+            loss = loss + dwt_w * dwt_loss(image)
         loss.backward()
 
         self.model.optimizer.step()
@@ -252,7 +375,7 @@ class HSIInpaintingTrainer:
                         "PSNR(gt)": f"{psnr_gt:.4f}",
                         "PSNR(obs)": f"{psnr_obs:.4f}",
                         "PSNR(miss)": f"{psnr_missing:.4f}",
-                        "||UV||": f"{delta_norm:.6f}",
+                        "delta E": f"{delta_norm:.6f}",
                     })
                     progress_bar.update(10)
 
@@ -270,12 +393,12 @@ class HSIInpaintingTrainer:
         calib_info = (
             f"  Calibration: freeze={self.args.freeze_endmember_calibration}, "
             f"calib_rank={self.args.calib_rank}, gamma={self.args.gamma}\n"
-            f"  ||U@V|| (best):           {best_dn:.6f}\n"
+            f"  delta E (best):           {best_dn:.6f}\n"
         )
 
         self.logwriter.write(
             f"HSI Inpainting Complete in {end_time:.4f}s\n"
-            f"  Dataset: {self.args.dataset}, Rank: {self.rank}, C: {self.C}\n"
+            f"  Dataset: {self.args.dataset}, Label: {self.dataset_label}, Rank: {self.rank}, C: {self.C}\n"
             f"  Mask: {self.args.mask_type}, ratio={self.args.mask_ratio}\n"
             + calib_info +
             f"  PSNR(masked vs gt):        {self.psnr_masked:.4f}  (degradation baseline)\n"
@@ -330,6 +453,7 @@ class HSIInpaintingTrainer:
             "calib_rank": self.args.calib_rank,
             "gamma": self.args.gamma,
             "freeze_endmember_calibration": self.args.freeze_endmember_calibration,
+            "dwt_weight": self.args.dwt_weight,
         })
 
         return best_metrics["psnr_full"], best_sam, best_ssim, end_time
@@ -340,7 +464,7 @@ def parse_args(argv=None):
 
     # Data
     parser.add_argument("--dataset", type=str, default="JasperRidge",
-                        help="HSI dataset: Urban | Salinas | JasperRidge | PaviaU")
+                        help="Dataset name or directory path. Supports Urban, Salinas, JasperRidge, PaviaU, beads_ms, chart_and_stuffed_toy_ms, feathers_ms, flowers_ms, or a scene directory.")
     parser.add_argument("--rank", type=int, default=10,
                         help="NMF rank (number of endmembers)")
 
@@ -364,9 +488,6 @@ def parse_args(argv=None):
                         help="Number of training iterations.")
     parser.add_argument("--lr", type=float, default=5e-3,
                         help="Learning rate.")
-    parser.add_argument("--loss_type", type=str, default="L2",
-                        choices=["L1", "L2"],
-                        help="Fidelity loss type.")
     parser.add_argument("--opt_type", type=str, default="adan",
                         choices=["adam", "adan"],
                         help="Optimizer type.")
@@ -382,6 +503,12 @@ def parse_args(argv=None):
                              "Ablation switch.")
     parser.add_argument("--nmf_max_iter", type=int, default=12000,
                         help="Max iterations for masked NMF.")
+    parser.add_argument("--tv_weight", type=float, default=0.0,
+                        help="Weight for total-variation regularisation on the "
+                             "reconstructed image. 0 = disabled.")
+    parser.add_argument("--dwt_weight", type=float, default=0.0,
+                        help="Weight for DWT regularisation on the "
+                            "reconstructed image. 0 = disabled.")
 
     # Misc
     parser.add_argument("--model_path", type=str, default=None,
