@@ -35,6 +35,7 @@ from inpainting_utils import (
     generate_mask,
     compute_inpainting_psnrs,
     get_missing_mask,
+    masked_mse_loss,
     compute_ssim_hsi,
 )
 from endmember import masked_nmf_initialization
@@ -131,7 +132,7 @@ class HSIInpaintingTrainer:
         mask_np = self.mask.cpu().numpy()   # (1,1,H,W) or (1,C,H,W)
         E0, A0 = masked_nmf_initialization(
             I_np, mask_np, args.rank,
-            dataset_name=args.dataset, save=False,
+            mask_type=args.mask_type,
             max_iter=getattr(args, 'nmf_max_iter', 12000),
         )
         self.rank = E0.shape[0]
@@ -184,12 +185,8 @@ class HSIInpaintingTrainer:
         render_pkg = self.model.forward()
         image = render_pkg["render"]  # (1, C, H, W)
 
-        # Masked data fidelity: ||M ⊙ (Y_hat - Y_obs)||
-        masked_pred = image * self.mask
-        masked_gt = self.gt_image * self.mask
-
-        
-        data_loss = ((masked_pred - masked_gt) ** 2).mean() 
+        # Masked data fidelity: average squared error on observed entries only.
+        data_loss = masked_mse_loss(image, self.gt_image, self.mask)
 
         loss = data_loss
         tv_w = getattr(self.args, 'tv_weight', 0.0)
